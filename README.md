@@ -44,6 +44,7 @@ AI was used with strict heuristic guidance for the following:
 - **Architectural decision-making** — discussing design patterns, weighing trade-offs.
 - **Research and inspiration** — understanding how projects like Cairo-Dock, UKUI, and ChromeOS handle certain problems.
 - **Problem-solving** — bouncing ideas around when I'm stuck.
+- **Learning the language** — no one can become a C expert overnight and I would like to have my desktop during my lifetime.
 
 Some concepts in NuMATE are inspired by (but not copied from) projects including:
 
