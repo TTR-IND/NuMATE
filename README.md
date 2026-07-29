@@ -43,7 +43,7 @@ The settings application brings the same philosophy to system configuration: mod
 
 ## Engineering
 
-NuMATE is written in **C** and designed around the principle that a desktop environment should not need a space-age computer to display a few windows.
+NuMATE's Shell is written in **C** and designed around the principle that a desktop environment should not need a space-age computer to display a few windows.
 
 The goal is simple:
 
