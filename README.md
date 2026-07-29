@@ -33,6 +33,39 @@ NuMATE exists for those people.
 
 It is **MATE modernised, not MATE reinvented**.
 
+## AI Disclosure
+
+Because apparently this needs to be said upfront:
+
+**The shell is written entirely by me.** I did it myself because I wanted it done right.
+
+AI was used with strict heuristic guidance for the following:
+
+- **Architectural decision-making** — discussing design patterns, weighing trade-offs.
+- **Research and inspiration** — understanding how projects like Cairo-Dock, UKUI, and ChromeOS handle certain problems.
+- **Problem-solving** — bouncing ideas around when I'm stuck.
+
+Some concepts in NuMATE are inspired by (but not copied from) projects including:
+
+- **Cairo-Dock** — for its elegant dock behaviour
+- **UKUI** — for modern settings presentation
+- **ChromeOS** — for its clean, focused desktop metaphor
+
+**Here's what NuMATE does NOT tolerate:** spaghetti code, unnecessary complexity, and sloppy architecture.
+
+**Here's what NuMATE DOES tolerate:** contributors using AI tools to assist their work. I judge code, not where it came from.
+
+
+## About the Founder
+
+My name is Josh. I'm the founder and lead technical director of NuMATE.
+
+For the past ten years, I've worked in domestic appliance repair—consoles, phones, televisions, tablets, and more. I've dug through thousands of different firmware images and system implementations inside jukeboxes, gambling machines, and all sorts of embedded hardware that most people never think about.
+
+That work taught me something: **software can be fast and efficient, or it can be bloated and incoherent**. I know what makes software fast and efficient because I've spent years making it work on machines that had no business running anything at all.
+
+NuMATE is my attempt to consolidate that experience into something everyone can download and use. It's my vision of how a modern desktop should feel—responsive, clean, and built for people who just want to get work done.
+
 ## Design
 
 NuMATE takes inspiration from contemporary desktops such as ChromeOS and UKUI while retaining the usability and familiarity that made traditional Linux desktops good in the first place.
