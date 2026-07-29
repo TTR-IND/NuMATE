@@ -48,9 +48,9 @@ AI was used with strict heuristic guidance for the following:
 
 Some concepts in NuMATE are inspired by (but not copied from) projects including:
 
-- **Cairo-Dock** — for its elegant dock behaviour
-- **UKUI** — for modern settings presentation
-- **ChromeOS** — for its clean, focused desktop metaphor
+- **Cairo-Dock** — for its elegant dock behaviour.
+- **UKUI** — for modern settings presentation.
+- **ChromeOS** — for its clean, focused desktop metaphor.
 
 **Here's what NuMATE does NOT tolerate:** spaghetti code, unnecessary complexity, and sloppy architecture.
 
