@@ -146,4 +146,4 @@ These things should simply work.
 
 **NuMATE — a proper desktop, modernised.**
 
-© 2026 Josh A. Wheatstone - Torfaen Technology Research IND.
+© 2026 Josh A. Wheatstone - Torfaen Technology Research IND. - Apache 2.0
