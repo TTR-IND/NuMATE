@@ -1,6 +1,6 @@
 # NuMATE
 
-### MATE, brought into the current century.
+### MATE, brought forward.
 
 ![NuMATE desktop](scrn1.png)
 
