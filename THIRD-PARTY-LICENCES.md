@@ -56,47 +56,13 @@ packaging. No redistribution by NuMATE.
 | Engrampa | GPL-2.0-or-later |
 | Pluma | GPL-2.0-or-later |
 | GParted | GPL-2.0-or-later |
+| Firefox ESR (`firefox-esr`) | MPL 2.0 — Debian-packaged, trademark cleared by the distribution |
 | Lato font (`fonts-lato`) | SIL Open Font License 1.1 |
 | DejaVu fonts (`fonts-dejavu-core`) | Bitstream Vera Licence (permissive) |
 
-### ⚠ Flag: Waterfox
-
-Waterfox is the one component **not** installed from a distribution package —
-the installer downloads the official upstream tarball to `/opt`.
-
-- **Code licence:** MPL 2.0.
-- **Trademark:** the Waterfox name and logo are not covered by the MPL. This is
-  the same reason Debian historically shipped Firefox as "Iceweasel".
-- **Why it is fine here:** the installer downloads the *official, unmodified*
-  upstream build at install time and does not repackage, rebrand, or
-  redistribute it. Distributing a modified Waterfox build under the Waterfox
-  name would be the problem; this is not that.
-- **If you ship an ISO** with Waterfox preinstalled, that becomes
-  redistribution and is worth a short email to Waterfox to confirm they are
-  happy with it. They generally are, but get it in writing.
-
-Waterfox also bundles its own set of third-party licences, viewable in-browser
-at `about:license`.
-
-## Vendored in this repository
-
-| File | Licence |
-|---|---|
-| `bin/gonzo-shell.c` | AGPLv3 — original work |
-| `bin/numate-set-wallpaper` | AGPLv3 — original work |
-| `nemo/*.nemo_action`, `nemo/gtk.css` | AGPLv3 — original work |
-| `installer.sh` | AGPLv3 — original work |
-| `backgrounds/numate-wall.png` | **See flag below** |
-| `theme/gtk-themes/Fluent-*` | GPL-3.0 — upstream, `COPYING` retained |
-| `theme/cursors/Qogir-*` | GPL-3.0 inferred — **no licence file, see flag above** |
-
-### ⚠ Flag: the default wallpaper
-
-`backgrounds/numate-wall.png` is committed to this repository and therefore *is*
-redistributed by NuMATE. If it is your own work, add a line saying so and it is
-settled. If it came from anywhere else — a wallpaper site, an image search, an
-AI generator — its provenance needs establishing before a public release,
-because this is the one asset here that NuMATE actually distributes.
+All applications now come from Devuan's own repositories under their existing
+packaging. Nothing is downloaded from a third party at install time, which
+removes the only trademark question that previously applied here.
 
 ## NuMate-Settings
 
@@ -153,15 +119,18 @@ that repository:
 |---|---|---|---|
 | 1 | ~~Per-file "or later" check on MATE/UKUI code~~ | ✅ **Closed** | Done — found `mate-wp-*` is v2-only |
 | 2 | ~~In-source attribution headers~~ | ✅ **Closed** | SPDX + `MODIFICATIONS` headers in place |
-| 6 | Never link NuMate-Settings into the shell | **Standing rule** | GPL-2.0-only vs AGPLv3 — separate processes only |
 | 3 | Provenance of `numate-wall.png` | **Medium** | Confirm authorship; it is redistributed |
-| 4 | Qogir cursors have no licence file, and are vendored | **Medium** | Add `theme/cursors/README.md` with provenance + attribution |
-| 5 | Waterfox trademark if shipping an ISO | **Low** (not currently) | Email Waterfox before distributing images |
+| 4 | Qogir cursors have no licence file, and are vendored | **Medium** | `theme/cursors/README.md` records provenance + attribution |
+| 5 | ~~Waterfox trademark~~ | ✅ **Closed** | Waterfox dropped; Firefox ESR comes from the distribution |
+| 6 | Never link NuMate-Settings into the shell | **Standing rule** | GPL-2.0-only vs AGPLv3 — separate processes only |
 
-Items 1 and 2 are closed. Items 3 and 4 involve assets this repository actually
-distributes and are worth clearing before it goes public. Item 5 only becomes
-live if you ship prebuilt images. Item 6 is not a task — it is a constraint to
-respect from here on.
+Items 1, 2 and 5 are closed. Items 3 and 4 are the only ones left, and both
+concern assets this repository actually distributes — worth clearing before it
+goes public. Item 6 is not a task; it is a constraint to respect from here on.
+
+Dropping Waterfox closed item 5 outright and shrank the audit's surface: with
+every application now coming from Devuan's repositories, the distribution has
+already done the licence and trademark clearance for all of them.
 
 Item 4 is the one that changed when the theme went back to being vendored: while
 the installer fetched the cursors, NuMATE was not redistributing them and the
