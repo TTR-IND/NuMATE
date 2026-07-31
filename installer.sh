@@ -12,7 +12,7 @@
 # Stages:
 #   1. Standard MATE desktop for Devuan
 #   2. Purge the MATE components NuMATE replaces
-#   3. Curated applications  (Nemo, Engrampa, Pluma, Waterfox, GParted)
+#   3. Curated applications  (Nemo, Engrampa, Pluma, Firefox, GParted)
 #   4. Default-application bindings
 #   5. Fonts, themes, cursors, icons, Nemo integration
 #   6. NuMate-Settings   (fetched from GitHub — the only settings app)
@@ -30,7 +30,6 @@
 # DBUS_SESSION_BUS_ADDRESS — sudo/su do not forward those.
 #
 #   ./installer.sh                  — full install
-#   ./installer.sh --skip-waterfox  — skip the Waterfox tarball stage
 #   ./installer.sh --skip-theme     — skip fonts/themes/cursors
 #   ./installer.sh --skip-settings  — skip fetching/building NuMate-Settings
 #   ./installer.sh --skip-shell     — skip building the NuMATE shell
@@ -46,12 +45,6 @@ SCRIPT_DIR="$(readlink -f "$(dirname "$0")")"
 # ── Single source of truth for every value used in more than one place ─────
 # Anything referenced by two or more stages is defined exactly once, here.
 # A second copy of any of these is a bug, not a convenience.
-WATERFOX_VERSION="6.6.17"
-WATERFOX_URL="https://cdn.waterfox.com/waterfox/releases/${WATERFOX_VERSION}/Linux_x86_64/waterfox-${WATERFOX_VERSION}.tar.bz2"
-WATERFOX_PREFIX="/opt/waterfox"
-WATERFOX_BIN="/usr/local/bin/waterfox"
-WATERFOX_DESKTOP="waterfox.desktop"
-
 SETTINGS_REPO="https://github.com/TTR-IND/NuMate-Settings.git"
 SETTINGS_BIN="numate-settings"
 
@@ -68,7 +61,6 @@ WALLPAPER_NAME="numate-wall.png"
 WALLPAPER_SRC="$SCRIPT_DIR/backgrounds/$WALLPAPER_NAME"
 WALLPAPER_DEST="/usr/share/backgrounds/$WALLPAPER_NAME"
 
-OPT_SKIP_WATERFOX=0
 OPT_SKIP_THEME=0
 OPT_SKIP_SETTINGS=0
 OPT_SKIP_SHELL=0
@@ -76,7 +68,6 @@ OPT_DRY_RUN=0
 
 for _arg in "$@"; do
     case "$_arg" in
-        --skip-waterfox) OPT_SKIP_WATERFOX=1 ;;
         --skip-theme)    OPT_SKIP_THEME=1 ;;
         --skip-settings) OPT_SKIP_SETTINGS=1 ;;
         --skip-shell)    OPT_SKIP_SHELL=1 ;;
@@ -153,7 +144,7 @@ banner
 printf "  ${_b}This installer will:${_rst}\n"
 printf "    %s\n" \
     "install the standard MATE desktop, then strip the parts NuMATE replaces" \
-    "install Nemo, Engrampa, Pluma, Waterfox and GParted as the defaults" \
+    "install Nemo, Engrampa, Pluma, Firefox and GParted as the defaults" \
     "install NuMATE fonts, themes, cursors and Nemo integration" \
     "fetch and build NuMate-Settings — the single settings application" \
     "build the NuMATE shell and autostart it in the MATE session"
@@ -263,82 +254,72 @@ ok "orphaned dependencies cleaned"
 # ═══ 3 ═══ Curated applications ════════════════════════════════════════════
 stage "Installing the NuMATE application set"
 
-# nemo Recommends nemo-fileroller, which would drag file-roller back in
-# immediately after stage 2 purged it. --no-install-recommends on nemo
-# alone is too blunt (it drops genuinely wanted extensions too), so
-# nemo-fileroller is excluded by name instead and the Engrampa .nemo_action
-# files in nemo/ provide the archive context menu in its place.
-APT_APPS="nemo nemo-image-converter nemo-share nemo-audio-tab nemo-python \
-engrampa pluma gparted"
+# Everything here comes from Devuan's own repositories. No tarballs, no
+# third-party downloads, nothing from /opt — if it is not packaged, it is
+# not installed by this script.
 
-run sudo apt-get install -y $APT_APPS >/dev/null 2>&1 \
-    && ok "Nemo (+ extensions), Engrampa, Pluma, GParted" \
-    || die "application install failed"
+# Split into two lists, because they have different failure semantics.
+#
+# CORE is the desktop. If any of it is missing, the install is broken and
+# should stop loudly rather than leave a half-built system.
+#
+# EXTRAS are Nemo extensions. A missing extension is a cosmetic loss, not a
+# broken desktop. Installing the whole set in one apt call means one
+# unavailable package fails the entire transaction and takes the file
+# manager down with it — which is exactly how "application install failed"
+# happened, with the output suppressed so it named no package.
+#
+# Extras are therefore installed individually, best-effort, and each one
+# reports for itself.
+CORE_APPS="nemo engrampa pluma gparted"
+EXTRA_APPS="nemo-image-converter nemo-share nemo-audio-tab nemo-python"
 
+# The browser package differs between suites: Debian and Devuan stable ship
+# firefox-esr, while firefox proper appears only in unstable and backports.
+# Resolve it once against what apt actually has, rather than hardcoding a
+# name that is wrong on half the targets.
+BROWSER_PKG=""
+for _candidate in firefox-esr firefox; do
+    if apt-cache show "$_candidate" >/dev/null 2>&1; then
+        BROWSER_PKG="$_candidate"
+        break
+    fi
+done
+
+if [ -n "$BROWSER_PKG" ]; then
+    CORE_APPS="$CORE_APPS $BROWSER_PKG"
+    info "browser package resolved to $BROWSER_PKG"
+else
+    warn "neither firefox-esr nor firefox is available — no browser installed"
+fi
+
+# Core: fail loudly, and let apt's own error through. Suppressing output on
+# a fatal path is how a diagnosable problem becomes a mystery.
+if run sudo apt-get install -y $CORE_APPS >/dev/null 2>&1; then
+    ok "Nemo, Engrampa, Pluma, GParted${BROWSER_PKG:+, $BROWSER_PKG}"
+else
+    warn "core application install failed — apt output follows:"
+    sudo apt-get install -y $CORE_APPS 2>&1 | tail -20
+    die "cannot continue without the core applications"
+fi
+
+# Extras: one at a time, never fatal.
+for _pkg in $EXTRA_APPS; do
+    if ! apt-cache show "$_pkg" >/dev/null 2>&1; then
+        warn "$_pkg not available in this suite — skipped"
+    elif run sudo apt-get install -y "$_pkg" >/dev/null 2>&1; then
+        ok "$_pkg"
+    else
+        warn "$_pkg failed to install — skipped, desktop is unaffected"
+    fi
+done
+
+# nemo Recommends nemo-fileroller, which drags file-roller back in after
+# stage 2 purged it. The Engrampa .nemo_action files in nemo/ provide the
+# archive context menu instead.
 if dpkg -l nemo-fileroller 2>/dev/null | grep -q '^ii'; then
     run sudo apt-get purge -y nemo-fileroller >/dev/null 2>&1 || true
     ok "nemo-fileroller removed (Engrampa actions replace it)"
-fi
-
-# ── Waterfox ───────────────────────────────────────────────────────────────
-# Not packaged for Devuan — installed from the upstream tarball into /opt,
-# which is exactly what the FHS reserves for self-contained third-party
-# software. One versioned directory, one stable symlink; upgrading is
-# replacing the directory, and nothing else in the system points at the
-# version number.
-if [ "$OPT_SKIP_WATERFOX" -eq 1 ]; then
-    warn "--skip-waterfox: skipping Waterfox"
-elif [ "$(dpkg --print-architecture)" != "amd64" ]; then
-    warn "Waterfox upstream ships x86_64 only — architecture is $(dpkg --print-architecture); skipped"
-else
-    info "Downloading Waterfox $WATERFOX_VERSION..."
-    run sudo apt-get install -y curl bzip2 ca-certificates >/dev/null 2>&1 || true
-
-    _wf_tmp="$(mktemp -d)"
-    trap 'rm -rf "$_wf_tmp"' EXIT
-
-    if [ "$OPT_DRY_RUN" -eq 1 ]; then
-        info "[dry-run] fetch + install $WATERFOX_URL → $WATERFOX_PREFIX"
-    elif curl -fL# "$WATERFOX_URL" -o "$_wf_tmp/waterfox.tar.bz2"; then
-        # Verify before extracting. A captive portal or CDN error page
-        # returns HTTP 200 with HTML, which tar would fail on confusingly.
-        if tar -tjf "$_wf_tmp/waterfox.tar.bz2" >/dev/null 2>&1; then
-            sudo rm -rf "$WATERFOX_PREFIX"
-            sudo install -d "$WATERFOX_PREFIX"
-            # Upstream tarball has a single top-level waterfox/ directory.
-            sudo tar -xjf "$_wf_tmp/waterfox.tar.bz2" -C "$WATERFOX_PREFIX" --strip-components=1
-            sudo ln -sf "$WATERFOX_PREFIX/waterfox" "$WATERFOX_BIN"
-            ok "Waterfox $WATERFOX_VERSION → $WATERFOX_PREFIX"
-
-            sudo tee "/usr/share/applications/$WATERFOX_DESKTOP" >/dev/null <<WATERFOX_DESKTOP_ENTRY
-[Desktop Entry]
-Type=Application
-Name=Waterfox
-GenericName=Web Browser
-Comment=Browse the World Wide Web
-Exec=$WATERFOX_BIN %u
-Icon=$WATERFOX_PREFIX/browser/chrome/icons/default/default128.png
-Terminal=false
-Categories=Network;WebBrowser;
-MimeType=text/html;text/xml;application/xhtml+xml;x-scheme-handler/http;x-scheme-handler/https;
-StartupNotify=true
-StartupWMClass=waterfox
-WATERFOX_DESKTOP_ENTRY
-            ok "Waterfox desktop entry installed"
-
-            # Register with update-alternatives so `x-www-browser` and
-            # anything asking the alternatives system resolves to Waterfox.
-            sudo update-alternatives --install /usr/bin/x-www-browser x-www-browser "$WATERFOX_BIN" 200 >/dev/null 2>&1 || true
-            sudo update-alternatives --set x-www-browser "$WATERFOX_BIN" >/dev/null 2>&1 || true
-            ok "Waterfox registered as x-www-browser"
-        else
-            warn "Downloaded file is not a valid bzip2 tarball — Waterfox skipped"
-            warn "(check $WATERFOX_URL is still valid)"
-        fi
-    else
-        warn "Waterfox download failed — skipped, everything else continues"
-    fi
-    rm -rf "$_wf_tmp"; trap - EXIT
 fi
 
 
@@ -363,24 +344,43 @@ application/x-compressed-tar application/x-bzip-compressed-tar application/x-xz-
 TEXT_MIMES="text/plain text/x-csrc text/x-chdr text/markdown application/x-shellscript"
 FOLDER_MIMES="inode/directory"
 
-if [ "$OPT_SKIP_WATERFOX" -eq 0 ] && [ -f "/usr/share/applications/$WATERFOX_DESKTOP" ]; then
-    set_default "$WATERFOX_DESKTOP" $WEB_MIMES
-    run xdg-settings set default-web-browser "$WATERFOX_DESKTOP" 2>/dev/null || true
-    ok "Waterfox — default web browser"
+# The desktop id follows the package name on both Debian and Devuan
+# (firefox-esr.desktop / firefox.desktop), but it is checked rather than
+# assumed — a wrong id here fails silently and leaves the browser unbound.
+BROWSER_DESKTOP=""
+if [ -n "$BROWSER_PKG" ] && [ -f "/usr/share/applications/$BROWSER_PKG.desktop" ]; then
+    BROWSER_DESKTOP="$BROWSER_PKG.desktop"
+fi
+
+if [ -n "$BROWSER_DESKTOP" ]; then
+    set_default "$BROWSER_DESKTOP" $WEB_MIMES
+    run xdg-settings set default-web-browser "$BROWSER_DESKTOP" 2>/dev/null || true
+    ok "$BROWSER_PKG — default web browser"
+else
+    warn "no browser desktop entry found — web defaults left unchanged"
 fi
 set_default engrampa.desktop $ARCHIVE_MIMES ; ok "Engrampa — default archive manager"
 set_default pluma.desktop    $TEXT_MIMES    ; ok "Pluma — default text editor"
 set_default nemo.desktop     $FOLDER_MIMES  ; ok "Nemo — default file manager"
 
 if [ "$OPT_DRY_RUN" -eq 0 ]; then
+    # Written without the browser lines if no browser resolved, rather than
+    # writing a mimeapps.list pointing at a .desktop that does not exist —
+    # a dangling default is worse than no default, because xdg-open fails
+    # instead of falling through to the next candidate.
+    _browser_mimes=""
+    if [ -n "$BROWSER_DESKTOP" ]; then
+        _browser_mimes="text/html=$BROWSER_DESKTOP
+application/xhtml+xml=$BROWSER_DESKTOP
+x-scheme-handler/http=$BROWSER_DESKTOP
+x-scheme-handler/https=$BROWSER_DESKTOP"
+    fi
+
     sudo tee /usr/share/applications/mimeapps.list >/dev/null <<MIMEAPPS
 [Default Applications]
 inode/directory=nemo.desktop
 text/plain=pluma.desktop
-text/html=$WATERFOX_DESKTOP
-application/xhtml+xml=$WATERFOX_DESKTOP
-x-scheme-handler/http=$WATERFOX_DESKTOP
-x-scheme-handler/https=$WATERFOX_DESKTOP
+$_browser_mimes
 application/zip=engrampa.desktop
 application/x-7z-compressed=engrampa.desktop
 application/x-rar=engrampa.desktop
@@ -805,7 +805,7 @@ printf "    %s\n" \
     "Nemo — file manager and desktop"
 printf "\n  ${_b}Applications${_rst}\n"
 printf "    %s\n" \
-    "Waterfox $WATERFOX_VERSION  — default web browser" \
+    "${BROWSER_PKG:-no browser} — default web browser" \
     "Engrampa       — default archive manager" \
     "Pluma          — default text editor" \
     "GParted        — disk management"
