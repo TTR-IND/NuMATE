@@ -105,7 +105,7 @@ typedef struct {
     gchar       *sender_bus_name;
     gchar       *object_path;
     gchar       *menu_path;
-    /* Live dbusmenu built eagerly at registration so it’s warm on first click */
+    /* Live dbusmenu built eagerly at registration so it's warm on first click */
     GtkWidget   *dbus_menu;
 } AppNotificationGroup;
 
@@ -367,7 +367,7 @@ apply_styles(void)
         "#GonzoMenuAppList, #GonzoMenuAppList row, viewport { background-color: transparent; background-image: none; border: none; box-shadow: none; }\n"
         "#GonzoMenuAppList row:hover { background-color: rgba(255,255,255,0.1); }\n"
         "#GonzoMenuAppList row:selected { background-color: rgba(255,255,255,0.15); }\n"
-        "/* App menu scrollbar: scoped to #GonzoMenu so this CSS doesn’t leak to other apps */\n"
+        "/* App menu scrollbar: scoped to #GonzoMenu so this CSS doesn't leak to other apps */\n"
         "#GonzoMenu scrollbar { background: transparent; border: none; }\n"
         "#GonzoMenu scrollbar trough { background: transparent; border: none; box-shadow: none; }\n"
         "#GonzoMenu scrollbar slider { background: rgba(255,255,255,0.25); border: none; border-radius: 999px; min-width: 8px; margin: 4px 12px 4px 3px; }\n"
@@ -397,9 +397,6 @@ apply_styles(void)
         "#NotifSender { font-size: 13px; font-weight: 600; color: #ffffff; }\n"
         "#NotifTime { font-size: 11px; color: #8e9297; }\n"
         "#NotifContent { font-size: 13px; color: #c4c7cc; line-height: 1.4; }\n"
-        "#NotifAction { font-size: 12px; font-weight: 500; color: #b0b8c1; background: rgba(255,255,255,0.08); border: none; border-radius: 16px; padding: 6px 14px; }\n"
-        "#NotifAction:hover { background: rgba(255,255,255,0.18); }\n"
-        "#NotifAction:first-child { background: #4a6cf7; color: white; }\n"
         "#NotifFooter { padding: 12px; border-top: 1px solid rgba(255,255,255,0.06); }\n"
         "#NotifFooterBtn { font-size: 13px; font-weight: 500; color: #c4c7cc; background: rgba(255,255,255,0.05); border: none; border-radius: 20px; padding: 8px 16px; }\n"
         "#NotifFooterBtn:hover { background: rgba(255,255,255,0.12); }\n"
@@ -680,19 +677,23 @@ on_app_options_clicked(GtkWidget *button, gpointer user_data)
 {
     AppNotificationGroup *group = user_data;
     
-    /* If the app exposes a dbusmenu, we draw it ourselves so it can
-     * stack above our override-redirect panels.  The app’s own
-     * ContextMenu method draws a WM‑managed window that lands beneath
-     * the panels and is invisible. */
+    /*
+     * If the app exposes a dbusmenu, we draw it ourselves so it can
+     * stack above our override-redirect panels.  The app's own
+     * ContextMenu method draws a WM-managed window that lands beneath
+     * the panels and is invisible.
+     */
     if (group->dbus_menu) {
         gtk_menu_popup_at_widget(GTK_MENU(group->dbus_menu), button,
                                  GDK_GRAVITY_SOUTH_EAST, GDK_GRAVITY_NORTH_EAST, NULL);
         return;
     }
     
-    /* Fallback: ask the app to show its own menu via ContextMenu(x,y).
+    /*
+     * Fallback: ask the app to show its own menu via ContextMenu(x,y).
      * Position hint computed correctly (translate coordinates to root)
-     * so it appears near the button instead of far off‑screen. */
+     * so it appears near the button instead of far off-screen.
+     */
     if (group->has_tray_item && group->sender_bus_name && group->object_path) {
         GtkWidget *toplevel = gtk_widget_get_toplevel(button);
         gint local_x = 0, local_y = 0;
@@ -718,7 +719,7 @@ on_app_options_clicked(GtkWidget *button, gpointer user_data)
         return;
     }
     
-    /* Pure notification group (no tray item) – GonzOS‑provided menu */
+    /* Pure notification group (no tray item) – GonzOS-provided menu */
     GtkWidget *menu = gtk_menu_new();
     GtkWidget *mute_item = gtk_menu_item_new_with_label("Mute Notifications");
     g_signal_connect(mute_item, "activate", G_CALLBACK(on_mute_app_clicked), group->app_name);
@@ -757,17 +758,8 @@ create_notification_bubble(Notification *notif)
     gtk_label_set_line_wrap(GTK_LABEL(content_label), TRUE);
     gtk_label_set_max_width_chars(GTK_LABEL(content_label), 40);
     
-    GtkWidget *actions_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
-    GtkWidget *reply_btn = gtk_button_new_with_label("Reply");
-    gtk_widget_set_name(reply_btn, "NotifAction");
-    GtkWidget *read_btn = gtk_button_new_with_label("Mark read");
-    gtk_widget_set_name(read_btn, "NotifAction");
-    gtk_box_pack_start(GTK_BOX(actions_row), reply_btn, FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(actions_row), read_btn, FALSE, FALSE, 0);
-    
     gtk_box_pack_start(GTK_BOX(bubble), header, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(bubble), content_label, FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(bubble), actions_row, FALSE, FALSE, 0);
     return bubble;
 }
 
@@ -1781,6 +1773,13 @@ create_dock_item(GAppInfo *app, int icon_size, int widget_width, int widget_heig
     g_object_set_data(G_OBJECT(event_box), "img-ref", icon_widget);
     g_signal_connect(icon_widget, "destroy", G_CALLBACK(on_image_destroy_cleanup), NULL);
     
+    /*
+     * Belt-and-suspenders: if the dock icon is destroyed for any reason
+     * (window closed, unpinned app, dock refresh), cancel any instance
+     * popup that might still be polling its now-dangling widget pointer.
+     */
+    g_signal_connect_swapped(event_box, "destroy", G_CALLBACK(cancel_instance_popup), NULL);
+    
     return event_box;
 }
 
@@ -2408,6 +2407,16 @@ on_window_closed(WnckScreen *screen, WnckWindow *window, gpointer user_data)
             }
         }
         if (!is_pinned) {
+            /*
+             * Cancel any instance popup that references this widget
+             * before destroying it.  The popup poll timer holds a
+             * pointer to current_dock_icon; if the icon is destroyed
+             * while the timer is running, the next poll tick would
+             * call is_pointer_over_widget on a dangling pointer.
+             */
+            if (g_shell->current_dock_icon == target_widget)
+                cancel_instance_popup();
+
             identity_unregister_widget(target_widget);
             gtk_widget_destroy(target_widget);
         }
@@ -2680,7 +2689,7 @@ on_sni_properties_ready(GObject *source, GAsyncResult *result, gpointer user_dat
         }
     }
     
-    /* Resolve a human-readable name from the app’s executable */
+    /* Resolve a human-readable name from the app's executable */
     gchar *display_name = NULL;
     GDBusConnection *bus = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, NULL);
     if (bus) {
@@ -2724,7 +2733,7 @@ on_sni_properties_ready(GObject *source, GAsyncResult *result, gpointer user_dat
     group->object_path = g_strdup(pending->object_path);
     group->menu_path = menu_path ? g_strdup(menu_path) : NULL;
     
-    /* Build the app’s own dbusmenu eagerly so it’s ready on first click */
+    /* Build the app's own dbusmenu eagerly so it's ready on first click */
     if (group->dbus_menu) { gtk_widget_destroy(group->dbus_menu); group->dbus_menu = NULL; }
     if (group->menu_path && pending->sender_bus_name) {
         DbusmenuGtkMenu *dm = dbusmenu_gtkmenu_new(pending->sender_bus_name, group->menu_path);
@@ -2846,8 +2855,10 @@ on_watcher_name_lost(GDBusConnection *connection, const gchar *name, gpointer us
 static void
 own_status_notifier_host_name(void)
 {
-    /* Qt5 apps expect a *Host* to be present at start‑up; owning this name
-     * satisfies that requirement without any actual server behind it. */
+    /*
+     * Qt5 apps expect a *Host* to be present at start‑up; owning this name
+     * satisfies that requirement without any actual server behind it.
+     */
     gchar *host_name = g_strdup_printf("org.kde.StatusNotifierHost-%d", (int)getpid());
     g_bus_own_name(G_BUS_TYPE_SESSION, host_name, G_BUS_NAME_OWNER_FLAGS_NONE,
                    NULL, NULL, NULL, NULL, NULL);
