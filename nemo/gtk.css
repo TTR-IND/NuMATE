@@ -1,0 +1,44 @@
+/* GonzOS Nemo overrides — theme-independent.
+ *
+ * Installed to ~/.config/gtk-3.0/gtk.css for every user. GTK loads
+ * this file unconditionally at GTK_STYLE_PROVIDER_PRIORITY_USER —
+ * the highest priority tier, above the active theme — regardless of
+ * which GTK theme is selected (confirmed against GTK3's own source,
+ * gtk/gtksettings.c: gtk-3.0/gtk.css under g_get_user_config_dir()).
+ * These rules apply to Nemo specifically and have nothing to do with
+ * theme choice, so they do not belong inside a theme's own gtk.css —
+ * putting them there means they only work when that one theme happens
+ * to be selected, which is not the intent.
+ *
+ * Sidebar padding: increases per-row space in the places sidebar.
+ * Scoped to .nemo-window so it cannot affect any other GTK3
+ * application.
+ *
+ * Disk-usage bar: "removed" without patching Nemo. NemoCellRendererDisk's
+ * own convert_color() (nemo-cell-renderer-disk.c) hardcodes alpha=1 on
+ * every color it reads — rgba(...,0) parses but is silently forced
+ * back to opaque before the fill, so true transparency isn't reachable
+ * via CSS. Instead both disk-full-bg-color and disk-full-fg-color are
+ * set to #2c2c2c to match the sidebar background — the bar still
+ * draws, fully opaque, but matches the background so it's visually
+ * gone.
+ *
+ * KNOWN LIMITATION, not fixable from CSS: gtk_style_context_get_style()
+ * (the call this renderer uses to read those two colors) is invoked
+ * once per render with no state parameter, and
+ * nemo_cell_renderer_disk_render() never reads the GtkCellRendererState
+ * flags it's given to vary the color by row state. A :hover or
+ * :selected variant of this rule parses but is never looked up. So the
+ * bar's static #2c2c2c fill will still be faintly visible as a dark
+ * rectangle whenever that row is selected or hovered, since the row
+ * highlight underneath is a different color at that moment. Fixing it
+ * for real requires reading `flags` in render() and branching the
+ * color choice — a source change, not a CSS one. */
+.nemo-window .sidebar .view {
+    -GtkTreeView-vertical-separator: 6;
+    padding-top: 4px;
+}
+.places-treeview {
+    -NemoPlacesTreeView-disk-full-bg-color: #2c2c2c;
+    -NemoPlacesTreeView-disk-full-fg-color: #2c2c2c;
+}

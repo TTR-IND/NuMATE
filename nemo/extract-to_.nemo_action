@@ -1,0 +1,9 @@
+[Nemo Action]
+Name=Extract to "%e/"
+Comment=Extract archive(s) into new folder
+Exec=sh -c 'mkdir -p "%P/%e" && engrampa --extract-to="%P/%e" %F'
+Selection=s
+Extensions=zip;7z;rar;tar;gz;bz2;xz;tar.gz;tar.xz;tar.bz2;
+Icon-Name=extract-archive-symbolic
+Quote=double
+Dependencies=engrampa;
