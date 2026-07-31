@@ -35,6 +35,14 @@
 #   ./installer.sh --skip-shell     — skip building the NuMATE shell
 #   ./installer.sh --dry-run        — print every stage, change nothing
 #
+# ── Developer options ─────────────────────────────────────────────────────
+# For re-running part of a failed install. They assume the earlier stages
+# already completed on this machine; on a fresh system, do not use them.
+#
+#   ./installer.sh --list-stages    — list the stages and their numbers
+#   ./installer.sh --from-stage=5   — start at stage 5, run 5 through 8
+#   ./installer.sh --only-stage=3   — run stage 3 and nothing else
+#
 # © 2026 Josh A. Wheatstone — Torfaen Technology Research IND. — AGPLv3
 # ═══════════════════════════════════════════════════════════════════════════
 set -eu
@@ -65,6 +73,8 @@ OPT_SKIP_THEME=0
 OPT_SKIP_SETTINGS=0
 OPT_SKIP_SHELL=0
 OPT_DRY_RUN=0
+OPT_FROM_STAGE=1
+OPT_ONLY_STAGE=0
 
 for _arg in "$@"; do
     case "$_arg" in
@@ -72,12 +82,35 @@ for _arg in "$@"; do
         --skip-settings) OPT_SKIP_SETTINGS=1 ;;
         --skip-shell)    OPT_SKIP_SHELL=1 ;;
         --dry-run)       OPT_DRY_RUN=1 ;;
+        --from-stage=*)  OPT_FROM_STAGE="${_arg#*=}" ;;
+        --only-stage=*)  OPT_ONLY_STAGE="${_arg#*=}" ;;
+        --list-stages)
+            printf "NuMATE installer stages:\n"
+            printf "  %s\n" \
+                "1  Standard MATE desktop" \
+                "2  Purge what NuMATE replaces" \
+                "3  Curated applications" \
+                "4  Default application bindings" \
+                "5  Fonts, themes, cursors, Nemo integration" \
+                "6  NuMate-Settings" \
+                "7  NuMATE shell" \
+                "8  Desktop defaults"
+            exit 0 ;;
         --help|-h)
             sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'
             exit 0 ;;
         *) echo "Unknown option: $_arg  (try --help)" >&2; exit 1 ;;
     esac
 done
+
+case "$OPT_FROM_STAGE" in ''|*[!0-9]*) echo "--from-stage needs a number 1-8" >&2; exit 1 ;; esac
+case "$OPT_ONLY_STAGE" in ''|*[!0-9]*) echo "--only-stage needs a number 1-8" >&2; exit 1 ;; esac
+if [ "$OPT_FROM_STAGE" -lt 1 ] || [ "$OPT_FROM_STAGE" -gt 8 ]; then
+    echo "--from-stage must be 1-8 (see --list-stages)" >&2; exit 1
+fi
+if [ "$OPT_ONLY_STAGE" -gt 8 ]; then
+    echo "--only-stage must be 1-8 (see --list-stages)" >&2; exit 1
+fi
 
 # ── Presentation ───────────────────────────────────────────────────────────
 _b="" _dim="" _g="" _y="" _r="" _c="" _rst=""
@@ -100,8 +133,10 @@ banner() {
     printf "${_c}    ╰───────────────────────────────────────────────╯${_rst}\n\n"
 }
 
+# STAGE_N is set by the dispatcher before each call rather than incremented
+# here, so that --from-stage=5 prints [5/8] and not [1/8]. A progress
+# counter that lies about which stage failed is worse than none.
 stage() {
-    STAGE_N=$((STAGE_N + 1))
     printf "\n${_b}${_c}[%d/%d]${_rst} ${_b}%s${_rst}\n" "$STAGE_N" "$TOTAL_STAGES" "$*"
     printf "${_dim}      %s${_rst}\n" "────────────────────────────────────────────────"
 }
@@ -110,6 +145,26 @@ ok()   { printf "      ${_g}✓${_rst}  %s\n" "$*"; }
 info() { printf "      ${_dim}·${_rst}  ${_dim}%s${_rst}\n" "$*"; }
 warn() { printf "      ${_y}!${_rst}  %s\n" "$*"; }
 die()  { printf "      ${_r}✗${_rst}  %s\n" "$*" >&2; exit 1; }
+
+# Browser resolution lives in one place because two stages need it: stage 3
+# to install it, stage 4 to bind it to MIME types. Duplicating the candidate
+# list would let the two drift, and a stage started in isolation via
+# --from-stage would inherit nothing. Idempotent and safe to call repeatedly.
+BROWSER_PKG=""
+BROWSER_DESKTOP=""
+resolve_browser() {
+    BROWSER_PKG=""
+    BROWSER_DESKTOP=""
+    for _cand in firefox-esr firefox; do
+        if apt-cache show "$_cand" >/dev/null 2>&1; then
+            BROWSER_PKG="$_cand"
+            break
+        fi
+    done
+    if [ -n "$BROWSER_PKG" ] && [ -f "/usr/share/applications/$BROWSER_PKG.desktop" ]; then
+        BROWSER_DESKTOP="$BROWSER_PKG.desktop"
+    fi
+}
 
 # Every mutating command routes through run(). --dry-run then costs one
 # branch in one place rather than a conditional at every call site.
@@ -161,6 +216,7 @@ run sudo apt-get update -qq >/dev/null 2>&1 || warn "apt update reported warning
 
 
 # ═══ 1 ═══ Standard MATE desktop ═══════════════════════════════════════════
+stage_1() {
 stage "Installing the standard MATE desktop"
 info "This is the full metapackage — the next stage strips it back."
 info "First run downloads a few hundred MB; this takes a while."
@@ -168,9 +224,10 @@ info "First run downloads a few hundred MB; this takes a while."
 run sudo apt-get install -y mate-desktop-environment >/dev/null 2>&1 \
     && ok "mate-desktop-environment installed" \
     || die "MATE install failed — resolve apt errors and re-run."
-
+}
 
 # ═══ 2 ═══ Purge what NuMATE replaces ══════════════════════════════════════
+stage_2() {
 stage "Removing the MATE components NuMATE replaces"
 
 # The requested removal list, exactly as specified. Two entries are NOT
@@ -249,9 +306,10 @@ ok "mate-power-preferences hidden (backlight backend deliberately kept)"
 # One targeted autoremove now that the keep-list is pinned manual.
 run sudo apt-get autoremove -y >/dev/null 2>&1 || true
 ok "orphaned dependencies cleaned"
-
+}
 
 # ═══ 3 ═══ Curated applications ════════════════════════════════════════════
+stage_3() {
 stage "Installing the NuMATE application set"
 
 # Everything here comes from Devuan's own repositories. No tarballs, no
@@ -278,13 +336,7 @@ EXTRA_APPS="nemo-image-converter nemo-share nemo-audio-tab nemo-python"
 # firefox-esr, while firefox proper appears only in unstable and backports.
 # Resolve it once against what apt actually has, rather than hardcoding a
 # name that is wrong on half the targets.
-BROWSER_PKG=""
-for _candidate in firefox-esr firefox; do
-    if apt-cache show "$_candidate" >/dev/null 2>&1; then
-        BROWSER_PKG="$_candidate"
-        break
-    fi
-done
+resolve_browser
 
 if [ -n "$BROWSER_PKG" ]; then
     CORE_APPS="$CORE_APPS $BROWSER_PKG"
@@ -293,24 +345,55 @@ else
     warn "neither firefox-esr nor firefox is available — no browser installed"
 fi
 
-# Core: fail loudly, and let apt's own error through. Suppressing output on
-# a fatal path is how a diagnosable problem becomes a mystery.
-if run sudo apt-get install -y $CORE_APPS >/dev/null 2>&1; then
-    ok "Nemo, Engrampa, Pluma, GParted${BROWSER_PKG:+, $BROWSER_PKG}"
+# Run ONCE, capturing output. Never re-run to obtain diagnostics: the second
+# run observes different state than the first (the first may have already
+# unpacked and configured), so it reports on a situation that no longer
+# exists and discards the original error permanently.
+#
+# Then decide on STATE, not on exit status. apt exits non-zero for reasons
+# that do not mean "the packages are missing" — a trigger warning, a
+# postinst on an unrelated package, a dpkg return path. The question this
+# stage actually needs answered is "is every core package installed?", and
+# dpkg-query answers that directly. Exit status is only a hint about where
+# to look.
+_apt_log="$(mktemp)"
+if [ "$OPT_DRY_RUN" -eq 1 ]; then
+    info "[dry-run] apt-get install -y $CORE_APPS"
 else
-    warn "core application install failed — apt output follows:"
-    sudo apt-get install -y $CORE_APPS 2>&1 | tail -20
+    sudo apt-get install -y $CORE_APPS >"$_apt_log" 2>&1 || true
+fi
+
+_missing=""
+for _pkg in $CORE_APPS; do
+    [ "$OPT_DRY_RUN" -eq 1 ] && continue
+    dpkg-query -W -f='${Status}' "$_pkg" 2>/dev/null | grep -q "ok installed" \
+        || _missing="$_missing $_pkg"
+done
+
+if [ -n "$_missing" ]; then
+    warn "these core packages are NOT installed:$_missing"
+    warn "last 25 lines of apt output:"
+    tail -25 "$_apt_log" >&2
+    rm -f "$_apt_log"
     die "cannot continue without the core applications"
 fi
+
+rm -f "$_apt_log"
+ok "Nemo, Engrampa, Pluma, GParted${BROWSER_PKG:+, $BROWSER_PKG}"
 
 # Extras: one at a time, never fatal.
 for _pkg in $EXTRA_APPS; do
     if ! apt-cache show "$_pkg" >/dev/null 2>&1; then
         warn "$_pkg not available in this suite — skipped"
-    elif run sudo apt-get install -y "$_pkg" >/dev/null 2>&1; then
-        ok "$_pkg"
+    elif [ "$OPT_DRY_RUN" -eq 1 ]; then
+        info "[dry-run] apt-get install -y $_pkg"
     else
-        warn "$_pkg failed to install — skipped, desktop is unaffected"
+        sudo apt-get install -y "$_pkg" >/dev/null 2>&1 || true
+        if dpkg-query -W -f='${Status}' "$_pkg" 2>/dev/null | grep -q "ok installed"; then
+            ok "$_pkg"
+        else
+            warn "$_pkg did not install — skipped, desktop is unaffected"
+        fi
     fi
 done
 
@@ -321,9 +404,10 @@ if dpkg -l nemo-fileroller 2>/dev/null | grep -q '^ii'; then
     run sudo apt-get purge -y nemo-fileroller >/dev/null 2>&1 || true
     ok "nemo-fileroller removed (Engrampa actions replace it)"
 fi
-
+}
 
 # ═══ 4 ═══ Default application bindings ════════════════════════════════════
+stage_4() {
 stage "Setting default applications"
 
 # xdg-mime writes per-user defaults; the system-wide equivalent is
@@ -347,10 +431,9 @@ FOLDER_MIMES="inode/directory"
 # The desktop id follows the package name on both Debian and Devuan
 # (firefox-esr.desktop / firefox.desktop), but it is checked rather than
 # assumed — a wrong id here fails silently and leaves the browser unbound.
-BROWSER_DESKTOP=""
-if [ -n "$BROWSER_PKG" ] && [ -f "/usr/share/applications/$BROWSER_PKG.desktop" ]; then
-    BROWSER_DESKTOP="$BROWSER_PKG.desktop"
-fi
+# Re-resolved rather than inherited from stage 3, so that starting at
+# stage 4 with --from-stage still knows which browser is installed.
+resolve_browser
 
 if [ -n "$BROWSER_DESKTOP" ]; then
     set_default "$BROWSER_DESKTOP" $WEB_MIMES
@@ -393,9 +476,10 @@ MIMEAPPS
 fi
 ok "System-wide defaults → /usr/share/applications/mimeapps.list"
 run sudo update-desktop-database /usr/share/applications >/dev/null 2>&1 || true
-
+}
 
 # ═══ 5 ═══ Fonts, themes, cursors, Nemo integration ════════════════════════
+stage_5() {
 if [ "$OPT_SKIP_THEME" -eq 1 ]; then
     stage "Fonts, themes and Nemo integration"
     warn "--skip-theme: skipping"
@@ -514,9 +598,10 @@ else
         warn "nemo/gtk.css not found — Nemo CSS overrides skipped"
     fi
 fi
-
+}
 
 # ═══ 6 ═══ NuMate-Settings ════════════════════════════════════════════════
+stage_6() {
 if [ "$OPT_SKIP_SETTINGS" -eq 1 ]; then
     stage "NuMate-Settings"
     warn "--skip-settings: skipping — NuMATE will have NO settings application"
@@ -565,9 +650,10 @@ else
     fi
     rm -rf "$_gs_dir"
 fi
-
+}
 
 # ═══ 7 ═══ NuMATE shell ════════════════════════════════════════════════════
+stage_7() {
 if [ "$OPT_SKIP_SHELL" -eq 1 ]; then
     stage "NuMATE shell"
     warn "--skip-shell: skipping — you will log into a session with no shell"
@@ -683,9 +769,10 @@ NEMO_AUTOSTART
     fi
     ok "Nemo desktop autostart → /etc/xdg/autostart/"
 fi
-
+}
 
 # ═══ 8 ═══ Desktop defaults ════════════════════════════════════════════════
+stage_8() {
 stage "Applying NuMATE desktop defaults"
 
 # Two paths, because they solve two different problems:
@@ -787,6 +874,37 @@ if [ "$OPT_DRY_RUN" -eq 0 ] && [ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
     ok "defaults applied to the current session"
 else
     info "no session bus detected — defaults will apply at next login"
+fi
+}
+
+# ═══ Dispatcher ════════════════════════════════════════════════════════════
+# Stages are functions so they can be addressed individually. The order is
+# fixed and the list is the single definition of what a full install is —
+# adding a stage means adding it here and nowhere else.
+
+if [ "$OPT_ONLY_STAGE" -gt 0 ]; then
+    _first="$OPT_ONLY_STAGE"; _last="$OPT_ONLY_STAGE"
+else
+    _first="$OPT_FROM_STAGE"; _last=8
+fi
+
+if [ "$_first" -ne 1 ] || [ "$_last" -ne 8 ]; then
+    warn "developer mode: running stages $_first-$_last only"
+    warn "earlier stages are assumed already complete on this machine"
+fi
+
+_n="$_first"
+while [ "$_n" -le "$_last" ]; do
+    STAGE_N="$_n"
+    "stage_$_n"
+    _n=$((_n + 1))
+done
+
+if [ "$_last" -ne 8 ]; then
+    printf "\n"
+    ok "stages $_first-$_last complete (partial run — no summary)"
+    printf "\n"
+    exit 0
 fi
 
 
