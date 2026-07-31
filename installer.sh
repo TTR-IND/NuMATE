@@ -626,9 +626,33 @@ else
         # A running instance holds the old inode open across a replace.
         pkill -9 "$SETTINGS_BIN" 2>/dev/null || true
 
-        if ( cd "$_gs_dir/NuMate-Settings" && make >/dev/null 2>&1 \
-             && sudo make install prefix=/usr/local >/dev/null 2>&1 ); then
-            ok "NuMate-Settings built and installed"
+        # Compile and install are SEPARATE steps with separate logs. Chained
+        # with && behind one suppressed redirect, a failing `make install`
+        # is indistinguishable from a failing `make`, and the message names
+        # the wrong one — which is exactly what "build failed" reported when
+        # the compile had actually succeeded.
+        _mk_log="$(mktemp)"
+        _build_ok=0
+        if ( cd "$_gs_dir/NuMate-Settings" && make ) >"$_mk_log" 2>&1; then
+            ok "NuMate-Settings compiled"
+            _build_ok=1
+        else
+            warn "COMPILE failed — last 25 lines:"
+            tail -25 "$_mk_log" >&2
+        fi
+
+        if [ "$_build_ok" -eq 1 ]; then
+            if ( cd "$_gs_dir/NuMate-Settings" && sudo make install prefix=/usr/local ) \
+                   >"$_mk_log" 2>&1; then
+                ok "NuMate-Settings installed"
+            else
+                warn "compile succeeded but INSTALL failed — last 25 lines:"
+                tail -25 "$_mk_log" >&2
+            fi
+        fi
+        rm -f "$_mk_log"
+
+        if [ "$_build_ok" -eq 1 ]; then
 
             # Verify rather than trust `make install` exiting 0. The shell's
             # settings button launches this binary by name and has no visible
@@ -640,8 +664,6 @@ else
                 warn "$SETTINGS_BIN is NOT on PATH after install"
                 warn "the shell's settings button will do nothing until it is"
             fi
-        else
-            warn "NuMate-Settings build failed — run make by hand in the repo to see why"
         fi
     else
         warn "Could not clone $SETTINGS_REPO"
@@ -849,7 +871,34 @@ else
     info "dconf profile already present — left unmodified"
 fi
 
-run sudo dconf update >/dev/null 2>&1 || true
+# `dconf update` is what compiles /etc/dconf/db/local.d into the binary
+# /etc/dconf/db/local that the GIO backend actually reads. Without it every
+# gsettings call emits "unable to open file '/etc/dconf/db/local'" and the
+# system-wide defaults never reach a new account.
+#
+# The command ships in dconf-cli, which is NOT pulled in by a minimal
+# Devuan install — gsettings comes from libglib2.0-bin and works without
+# it, so the absence is invisible until the warnings appear.
+run sudo apt-get install -y dconf-cli dconf-gsettings-backend >/dev/null 2>&1 \
+    || warn "could not install dconf-cli — system-wide defaults may not compile"
+
+if [ "$OPT_DRY_RUN" -eq 0 ]; then
+    _dconf_log="$(mktemp)"
+    sudo dconf update >"$_dconf_log" 2>&1 || true
+
+    # Verify by state: the database file either exists or it does not.
+    # `dconf update` exits 0 in situations where it has written nothing.
+    if [ -f /etc/dconf/db/local ]; then
+        ok "dconf database compiled → /etc/dconf/db/local"
+    else
+        warn "/etc/dconf/db/local was NOT created"
+        warn "system-wide defaults will not apply to new accounts"
+        [ -s "$_dconf_log" ] && tail -10 "$_dconf_log" >&2
+    fi
+    rm -f "$_dconf_log"
+else
+    info "[dry-run] dconf update"
+fi
 
 # Live session. Run directly, not via su — this script already runs as the
 # target user inside their real session, so DISPLAY and
