@@ -53,6 +53,32 @@ SCRIPT_DIR="$(readlink -f "$(dirname "$0")")"
 # ── Single source of truth for every value used in more than one place ─────
 # Anything referenced by two or more stages is defined exactly once, here.
 # A second copy of any of these is a bug, not a convenience.
+# ── Build dependencies ─────────────────────────────────────────────────────
+# Verified against a real Devuan install: every one of these exists and
+# resolves. Defined once and shared by stages 6 and 7 rather than listed
+# twice, because the two builds overlap almost completely and a package
+# added to one list but not the other is a failure that only shows up on
+# whichever stage was missed.
+#
+# The pkg-config module each -dev package provides is noted where the names
+# differ, since that mapping is not guessable (module "libnm" comes from
+# package libnm-dev; module "mate-desktop-2.0" from libmate-desktop-dev).
+BUILD_TOOLCHAIN="gcc make pkg-config git"
+
+BUILD_LIBS="libgtk-3-dev \
+libglib2.0-dev \
+libmatemixer-dev \
+libmate-desktop-dev \
+libxml2-dev \
+libxrandr-dev \
+libxcursor-dev \
+libnm-dev \
+libx11-dev"
+
+# Shell-only additions. The shell links wnck, json-glib and dbusmenu, which
+# the settings app does not use.
+SHELL_LIBS="libwnck-3-dev libjson-glib-dev libdbusmenu-gtk3-dev"
+
 SETTINGS_REPO="https://github.com/TTR-IND/NuMate-Settings.git"
 SETTINGS_BIN="numate-settings"
 
@@ -146,6 +172,92 @@ info() { printf "      ${_dim}·${_rst}  ${_dim}%s${_rst}\n" "$*"; }
 warn() { printf "      ${_y}!${_rst}  %s\n" "$*"; }
 die()  { printf "      ${_r}✗${_rst}  %s\n" "$*" >&2; exit 1; }
 
+# ── apt with retry ─────────────────────────────────────────────────────────
+# Every package install in this script goes through apt_install(). One
+# definition, so retry behaviour cannot differ between call sites.
+#
+# Why retry at all: apt downloads each package separately, and a dropped
+# connection or a mirror hiccup fails the whole transaction. Without retry
+# a single lost .deb means starting the several-hundred-megabyte MATE
+# download again. apt keeps what it already fetched in /var/cache/apt/
+# archives, so a retry resumes rather than restarts — it only re-fetches
+# what is actually still missing.
+#
+# Success is decided by dpkg state, not by apt's exit code. apt exits
+# non-zero for trigger warnings and unrelated postinst noise; the question
+# that matters is whether the packages are installed.
+#
+# Usage: apt_install <label> <pkg>...
+#   returns 0 if every package ended up installed, 1 otherwise
+#   on failure, APT_FAILED holds the packages still missing
+APT_RETRIES=4
+APT_LOG=""
+APT_FAILED=""
+
+pkg_installed() {
+    dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q "ok installed"
+}
+
+apt_install() {
+    _label="$1"; shift
+    _want="$*"
+    APT_FAILED=""
+
+    [ -n "$_want" ] || return 0
+
+    if [ "$OPT_DRY_RUN" -eq 1 ]; then
+        info "[dry-run] apt-get install -y $_want"
+        return 0
+    fi
+
+    APT_LOG="$(mktemp)"
+    _try=1
+    while [ "$_try" -le "$APT_RETRIES" ]; do
+        [ "$_try" -gt 1 ] && info "retry $_try/$APT_RETRIES — resuming, already-downloaded packages are kept"
+
+        sudo apt-get install -y \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=30 \
+            -o Acquire::https::Timeout=30 \
+            $_want >"$APT_LOG" 2>&1 || true
+
+        # Decide on state.
+        APT_FAILED=""
+        for _p in $_want; do
+            pkg_installed "$_p" || APT_FAILED="$APT_FAILED $_p"
+        done
+        [ -z "$APT_FAILED" ] && { rm -f "$APT_LOG"; return 0; }
+
+        # Distinguish "cannot ever work" from "try again". A package that
+        # does not exist in the suite will never appear no matter how many
+        # times we retry, so retrying it just wastes the user's time.
+        _retryable=0
+        for _p in $APT_FAILED; do
+            apt-cache show "$_p" >/dev/null 2>&1 && _retryable=1
+        done
+        if [ "$_retryable" -eq 0 ]; then
+            warn "$_label: package(s) not present in this suite:$APT_FAILED"
+            return 1
+        fi
+
+        if grep -qiE 'temporary failure|could not resolve|connection failed|connection timed out|unable to connect|hash sum mismatch|failed to fetch|no route to host|network is unreachable' "$APT_LOG"; then
+            warn "$_label: network or mirror problem on attempt $_try"
+            _try=$((_try + 1))
+            [ "$_try" -le "$APT_RETRIES" ] && sleep $((_try * 5))
+            continue
+        fi
+
+        # Not a network problem — retrying will not change the outcome.
+        break
+    done
+
+    warn "$_label: failed —$APT_FAILED"
+    warn "last 20 lines of apt output:"
+    tail -20 "$APT_LOG" >&2
+    rm -f "$APT_LOG"
+    return 1
+}
+
 # Browser resolution lives in one place because two stages need it: stage 3
 # to install it, stage 4 to bind it to MIME types. Duplicating the candidate
 # list would let the two drift, and a stage started in isolation via
@@ -221,9 +333,9 @@ stage "Installing the standard MATE desktop"
 info "This is the full metapackage — the next stage strips it back."
 info "First run downloads a few hundred MB; this takes a while."
 
-run sudo apt-get install -y mate-desktop-environment >/dev/null 2>&1 \
+apt_install "MATE desktop" mate-desktop-environment \
     && ok "mate-desktop-environment installed" \
-    || die "MATE install failed — resolve apt errors and re-run."
+    || die "MATE install failed — see the apt output above."
 }
 
 # ═══ 2 ═══ Purge what NuMATE replaces ══════════════════════════════════════
@@ -356,44 +468,18 @@ fi
 # stage actually needs answered is "is every core package installed?", and
 # dpkg-query answers that directly. Exit status is only a hint about where
 # to look.
-_apt_log="$(mktemp)"
-if [ "$OPT_DRY_RUN" -eq 1 ]; then
-    info "[dry-run] apt-get install -y $CORE_APPS"
-else
-    sudo apt-get install -y $CORE_APPS >"$_apt_log" 2>&1 || true
-fi
-
-_missing=""
-for _pkg in $CORE_APPS; do
-    [ "$OPT_DRY_RUN" -eq 1 ] && continue
-    dpkg-query -W -f='${Status}' "$_pkg" 2>/dev/null | grep -q "ok installed" \
-        || _missing="$_missing $_pkg"
-done
-
-if [ -n "$_missing" ]; then
-    warn "these core packages are NOT installed:$_missing"
-    warn "last 25 lines of apt output:"
-    tail -25 "$_apt_log" >&2
-    rm -f "$_apt_log"
-    die "cannot continue without the core applications"
-fi
-
-rm -f "$_apt_log"
+apt_install "core applications" $CORE_APPS \
+    || die "cannot continue without the core applications"
 ok "Nemo, Engrampa, Pluma, GParted${BROWSER_PKG:+, $BROWSER_PKG}"
 
 # Extras: one at a time, never fatal.
 for _pkg in $EXTRA_APPS; do
     if ! apt-cache show "$_pkg" >/dev/null 2>&1; then
         warn "$_pkg not available in this suite — skipped"
-    elif [ "$OPT_DRY_RUN" -eq 1 ]; then
-        info "[dry-run] apt-get install -y $_pkg"
+    elif apt_install "$_pkg" "$_pkg"; then
+        ok "$_pkg"
     else
-        sudo apt-get install -y "$_pkg" >/dev/null 2>&1 || true
-        if dpkg-query -W -f='${Status}' "$_pkg" 2>/dev/null | grep -q "ok installed"; then
-            ok "$_pkg"
-        else
-            warn "$_pkg did not install — skipped, desktop is unaffected"
-        fi
+        warn "$_pkg did not install — skipped, desktop is unaffected"
     fi
 done
 
@@ -486,24 +572,24 @@ if [ "$OPT_SKIP_THEME" -eq 1 ]; then
 else
     stage "Installing fonts, themes, cursors and Nemo integration"
 
-    run sudo apt-get install -y yaru-theme-icon yaru-theme-gtk yaru-theme-sound \
-        >/dev/null 2>&1 && ok "Yaru icon, GTK and sound themes" \
-        || warn "Yaru theme install failed — check repo availability"
+    apt_install "Yaru themes" yaru-theme-icon yaru-theme-gtk yaru-theme-sound \
+        && ok "Yaru icon, GTK and sound themes" \
+        || warn "Yaru theme install failed — desktop will use default icons"
 
     # Lato's Light weight registers under fontconfig as its own family
     # ("Lato Light", not a style of "Lato"), which is why UI_FONT above
     # resolves correctly rather than silently falling back.
-    run sudo apt-get install -y fonts-lato fonts-dejavu-core \
-        >/dev/null 2>&1 && ok "Lato + DejaVu Sans fonts" \
-        || warn "font install failed"
+    apt_install "fonts" fonts-lato fonts-dejavu-core \
+        && ok "Lato + DejaVu Sans fonts" \
+        || warn "font install failed — UI font will fall back"
 
     # Runtime requirements for the vendored theme. The GTK2 half of Fluent
     # needs the Murrine engine present or GTK2 applications silently fall
     # back to a default look with no error; gnome-themes-extra supplies the
     # base widget assets Fluent builds on. These are not build tools — the
     # theme ships prebuilt — but the theme is inert without them.
-    run sudo apt-get install -y gtk2-engines-murrine gtk2-engines-pixbuf gnome-themes-extra \
-        >/dev/null 2>&1 && ok "Murrine engine + base widget assets" \
+    apt_install "theme engines" gtk2-engines-murrine gtk2-engines-pixbuf gnome-themes-extra \
+        && ok "Murrine engine + base widget assets" \
         || warn "theme engine install failed — GTK2 apps may look unthemed"
 
     # ── Fluent GTK theme + Qogir cursors (vendored in theme/) ─────────────
@@ -611,11 +697,25 @@ else
 
     # Exactly the dependencies NuMate-Settings documents, plus the toolchain.
     # It builds with make, not a bundled install.sh.
-    run sudo apt-get install -y git gcc make pkg-config \
-        libgtk-3-dev libmatemixer-dev libmate-desktop-dev libxml2-dev \
-        libxrandr-dev libxcursor-dev libnm-dev libx11-dev \
-        >/dev/null 2>&1 && ok "build toolchain + NuMate-Settings headers" \
-        || die "build dependency install failed"
+    apt_install "build dependencies" $BUILD_TOOLCHAIN $BUILD_LIBS \
+        && ok "build toolchain + NuMate-Settings headers" \
+        || die "build dependency install failed — see the apt output above"
+
+    # Verify by pkg-config, not by apt. The build consumes modules, and a
+    # module that does not resolve fails the compile no matter what dpkg
+    # thinks about the package that was supposed to provide it.
+    if [ "$OPT_DRY_RUN" -eq 0 ]; then
+        _unresolved=""
+        for _m in gtk+-3.0 glib-2.0 gio-2.0 gio-unix-2.0 libmatemixer \
+                  mate-desktop-2.0 libxml-2.0 xrandr xcursor libnm x11; do
+            pkg-config --exists "$_m" 2>/dev/null || _unresolved="$_unresolved $_m"
+        done
+        if [ -n "$_unresolved" ]; then
+            warn "these pkg-config modules do not resolve:$_unresolved"
+            die "the build cannot succeed until they do"
+        fi
+        ok "all 11 pkg-config modules resolve"
+    fi
 
     _gs_dir="$(mktemp -d)"
     if [ "$OPT_DRY_RUN" -eq 1 ]; then
@@ -682,11 +782,9 @@ if [ "$OPT_SKIP_SHELL" -eq 1 ]; then
 else
     stage "Building the NuMATE shell"
 
-    run sudo apt-get install -y gcc pkg-config \
-        libgtk-3-dev libwnck-3-dev libjson-glib-dev libdbusmenu-gtk3-dev \
-        libmatemixer-dev libx11-dev \
-        >/dev/null 2>&1 && ok "shell build dependencies" \
-        || die "shell dependency install failed"
+    apt_install "shell dependencies" $BUILD_TOOLCHAIN $BUILD_LIBS $SHELL_LIBS \
+        && ok "shell build dependencies" \
+        || die "shell dependency install failed — see the apt output above"
 
     _shell_src="$SCRIPT_DIR/bin/gonzo-shell.c"
     if [ ! -f "$_shell_src" ]; then
@@ -879,7 +977,7 @@ fi
 # The command ships in dconf-cli, which is NOT pulled in by a minimal
 # Devuan install — gsettings comes from libglib2.0-bin and works without
 # it, so the absence is invisible until the warnings appear.
-run sudo apt-get install -y dconf-cli dconf-gsettings-backend >/dev/null 2>&1 \
+apt_install "dconf tools" dconf-cli dconf-gsettings-backend \
     || warn "could not install dconf-cli — system-wide defaults may not compile"
 
 if [ "$OPT_DRY_RUN" -eq 0 ]; then
@@ -978,6 +1076,39 @@ printf "    %s\n" \
     "GParted        — disk management"
 printf "\n  ${_b}Next${_rst}\n"
 printf "    %s\n" \
-    "Log out and back in to a MATE session — the shell starts automatically."
+    "Reboot to start NuMATE — you will be prompted below."
 printf "\n  ${_dim}mate-power-manager was kept deliberately: its preferences GUI is${_rst}\n"
 printf "  ${_dim}hidden, but the backlight helper the shell needs is still there.${_rst}\n\n"
+
+# ── Reboot ─────────────────────────────────────────────────────────────────
+# A reboot rather than just a re-login: this run replaced the session's
+# required panel component, installed a new session component, and compiled
+# a new system-wide dconf database. A fresh login picks up most of that, but
+# mate-session, dbus and the settings daemon are all long-lived and a reboot
+# is the one action guaranteed to start every part of the desktop from the
+# state now on disk.
+#
+# Read from /dev/tty rather than stdin so the prompt still works if the
+# script was invoked with its input redirected.
+if [ "$OPT_DRY_RUN" -eq 1 ]; then
+    info "[dry-run] would prompt to reboot"
+elif [ ! -t 0 ] && [ ! -e /dev/tty ]; then
+    warn "not an interactive terminal — reboot when convenient"
+else
+    printf "  ${_b}Reboot now to start NuMATE?${_rst} [Y/n] "
+    _reply=""
+    read -r _reply </dev/tty 2>/dev/null || _reply="n"
+    case "${_reply:-y}" in
+        [Nn]*)
+            printf "\n"
+            info "Not rebooting. Run 'sudo reboot' when you are ready."
+            printf "\n"
+            ;;
+        *)
+            printf "\n"
+            info "Rebooting in 5 seconds — press Ctrl-C to cancel."
+            sleep 5
+            sudo reboot
+            ;;
+    esac
+fi
