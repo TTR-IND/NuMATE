@@ -22,18 +22,10 @@ Clone the current pre-release tag and run the installer as your normal user —
 **not** with `sudo`:
 
 ```sh
-git clone --branch 1.0-Preview --depth 1 https://github.com/TTR-IND/NuMATE.git
+git clone https://github.com/TTR-IND/NuMATE.git
 cd NuMATE
 ./installer.sh
 ```
-
-`--branch 1.0-Preview` matters. Cloning without it gives you `main`, which is the
-development branch and is not what you want unless you are working on NuMATE
-itself. `--depth 1` skips the history, which is a smaller download.
-
-You can also download the release zip from the
-[**Releases**](https://github.com/TTR-IND/NuMATE/releases) page and unpack it —
-the result is the same tree.
 
 The installer calls `sudo` itself for the steps that need root. Running the whole
 thing as root breaks the final stage, which writes into your live session's dconf
