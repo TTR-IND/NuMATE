@@ -16,7 +16,7 @@ Just a fast, clean desktop that gets out of your way.
 
 ## Installation
 
-NuMATE installs on top of a Devuan system.
+NuMATE installs on top of Devuan systems running x11 or xLibre.
 
 Clone the current pre-release tag and run the installer as your normal user —
 **not** with `sudo`:
