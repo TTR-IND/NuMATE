@@ -1,5 +1,5 @@
 /*
- * ╔══════════════════════════════════════════════════════════════╗
+ * ╔══════════════════════════════════════════════════════════════════╗
  * ║                                                              ║
  * ║   ████████╗████████╗██████╗       ██╗███╗   ██╗██████╗       ║
  * ║   ╚══██╔══╝╚══██╔══╝██╔══██╗      ██║████╗  ██║██╔══██╗      ║
@@ -16,7 +16,9 @@
  *
  * gonzo-shell.c — Gonzo Shell — the NuMATE desktop interface
  *
- * Build: gcc gonzo-cc.c -o gonzo-cc $(pkg-config --cflags --libs gtk+-3.0 libwnck-3.0 json-glib-1.0) -lm
+ * Build: gcc -O2 -Wall -Wextra gonzo-shell.c -o gonzo-shell
+ *        $(pkg-config --cflags --libs gtk+-3.0 libwnck-3.0 json-glib-1.0 dbusmenu-gtk3-0.4 libmatemixer)
+ *        -lX11 -lm
  */
 
 #define WNCK_I_KNOW_THIS_IS_UNSTABLE 1
@@ -29,6 +31,7 @@
 #include <gio/gdesktopappinfo.h>
 #include <libwnck/libwnck.h>
 #include <libdbusmenu-gtk/menu.h>
+#include <libmatemixer/matemixer.h>
 #include <glib/gi18n.h>
 #include <json-glib/json-glib.h>
 #include <stdint.h>
@@ -73,9 +76,32 @@
 #define PANEL_MARGIN         12
 #define NOTIF_PANEL_GAP      10
 
+#define GONZO_ACCENT           "#B5342A"
+#define GONZO_ACCENT_SOFT      "rgba(181,52,42,0.14)"
+#define GONZO_ACCENT_SOFT_HI   "rgba(181,52,42,0.26)"
+
+#define TILE_ICON_PIXELS       28
+#define PANEL_ICON_PIXELS      22
+#define PANEL_ROW_SPACING      12
+#define PANEL_ROW_MARGIN_SIDE  24
+#define PANEL_ROW_MARGIN_TB     6
+
+#define WIFI_POLL_IDLE_MS        5000
+#define WIFI_POLL_CONNECTING_MS   700
+
+#define NOTIF_MAX_STRING_LENGTH  4096
+#define TRAY_ICON_MAX_DIM        256
+
 /* ═══════════════════════════════════════════════════════════════════════
  * DATA TYPES
  * ═══════════════════════════════════════════════════════════════════════ */
+
+typedef enum {
+    WIFI_OFF = 0,
+    WIFI_DISCONNECTED,
+    WIFI_CONNECTING,
+    WIFI_CONNECTED
+} WifiState;
 
 typedef struct {
     guint32      id;
@@ -89,6 +115,7 @@ typedef struct {
 
 typedef struct {
     gchar       *app_id;
+    gchar       *desktop_id;
     gchar       *app_name;
     gchar       *app_icon;
     GdkPixbuf   *icon_pixbuf;
@@ -100,12 +127,10 @@ typedef struct {
     GtkWidget   *badge_label;
     GtkWidget   *status_label;
     gboolean     collapsed;
-    /* Tray item fields – set only when a StatusNotifierItem is registered */
     gboolean     has_tray_item;
     gchar       *sender_bus_name;
     gchar       *object_path;
     gchar       *menu_path;
-    /* Live dbusmenu built eagerly at registration so it's warm on first click */
     GtkWidget   *dbus_menu;
 } AppNotificationGroup;
 
@@ -133,7 +158,7 @@ typedef struct {
     GtkWidget *window;
     GtkWidget *search_entry;
     GtkWidget *app_list;
-    GtkWidget *search_list;   /* list box for search results */
+    GtkWidget *search_list;
     GtkWidget *stack;
     GPtrArray *apps;
     ViewMode   current_view;
@@ -151,9 +176,7 @@ typedef struct {
     guint       gap_anim_id;
 } DockSlot;
 
-/* ── Global shell state (single container) ─────────────────────────── */
 typedef struct {
-    /* Shelf & Dock */
     GtkWidget  *shelf_window;
     GtkWidget  *shelf_box;
     GtkWidget  *dock_box;
@@ -174,40 +197,51 @@ typedef struct {
     GHashTable *identity_table;
     gboolean    shelf_rounded;
     
-    /* Panels */
     GtkWidget  *panel_window;
     GtkWidget  *notif_window;
-    
-    /* App menu */
     MenuData   *menu;
-    
-    /* Instance popup (multiple windows of the same app) */
     GtkWidget  *instance_popup;
     GtkWidget  *current_dock_icon;
     guint       popup_poll_timer;
     
-    /* Quick settings state */
+    GDBusProxy *upower_proxy;
+    MateMixerContext       *audio_context;
+    MateMixerStreamControl *audio_control;
+
     gboolean    wifi_enabled;
     gboolean    bt_enabled;
+    WifiState   wifi_state;
+    guint       wifi_poll_timer;
+    gboolean    wifi_poll_pending;
+    gboolean    bt_poll_pending;
     
-    /* Notification state */
     GList           *app_groups;
     GDBusConnection *notif_dbus_connection;
     guint32          next_notification_id;
     
-    /* Panel widget references */
+    GtkWidget *battery_box;
     GtkWidget *battery_icon;
     GtkWidget *battery_label;
+    GtkWidget *shelf_battery_icon;
+    GtkWidget *shelf_wifi_icon;
     GtkWidget *username_label;
     GtkWidget *brightness_slider;
+    GtkWidget *brightness_icon;
     GtkWidget *volume_slider;
     GtkWidget *volume_icon;
     GtkWidget *wifi_tile;
+    GtkWidget *wifi_icon;
+    GtkWidget *wifi_spinner;
+    GtkWidget *wifi_icon_stack;
+    GtkWidget *wifi_label;
     GtkWidget *bt_tile;
     GtkWidget *airplane_tile;
     GtkWidget *notif_inner_box;
     GtkWidget *notif_title_label;
     GtkWidget *notif_clear_button;
+
+    gboolean    volume_fallback_pending;
+    GDBusProxy *backlight_proxy;
 } GonzoShell;
 
 static GonzoShell *g_shell = NULL;
@@ -217,12 +251,15 @@ static GonzoShell *g_shell = NULL;
  * ═══════════════════════════════════════════════════════════════════════ */
 
 static void ensure_rgba_visual(GtkWidget *win);
-static gchar *run_command(const gchar *cmd);
 static void update_shelf_style(void);
 static void check_active_window_rounding(void);
 static void launch_cmd_cb(GtkWidget *widget, gpointer user_data);
 static void on_brightness_slider_changed(GtkRange *range, gpointer user_data);
 static void on_volume_slider_changed(GtkRange *range, gpointer user_data);
+static void update_volume_icon_display(void);
+static void refresh_volume_ui(void);
+static void refresh_battery_ui(void);
+static void backlight_init(void);
 static void toggle_panel(GtkWidget *button, gpointer user_data);
 static GtkWidget *create_quick_settings_panel(void);
 static GtkWidget *create_notification_center(void);
@@ -236,34 +273,155 @@ static void identity_register(const char *desktop_id, GtkWidget *widget);
 static GtkWidget *identity_lookup(const char *desktop_id);
 static void identity_unregister_widget(GtkWidget *widget);
 static void cancel_instance_popup(void);
+static void show_context_menu(GtkWidget *widget, GAppInfo *app, GdkEventButton *event);
+static void on_dock_item_destroy(GtkWidget *widget, gpointer user_data);
 static void show_instance_popup(GtkWidget *dock_icon);
 static void save_config(void);
 static void refresh_dock(void);
+static void close_app_action_widget(GtkWidget *widget);
+static void refresh_brightness_slider(void);
+
+/* ═══════════════════════════════════════════════════════════════════════
+ * ASYNC COMMAND RUNNER
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+typedef void (*AsyncCommandCallback)(const gchar *output, gpointer user_data);
+
+typedef struct {
+    gchar       *cmd;
+    AsyncCommandCallback callback;
+    gpointer     user_data;
+    GIOChannel  *stdout_ch;
+    GString     *stdout_buf;
+    GPid         child_pid;
+    guint        child_watch;
+    guint        io_watch;
+} AsyncCommand;
+
+static void async_command_free(AsyncCommand *ac)
+{
+    if (ac->stdout_ch) g_io_channel_unref(ac->stdout_ch);
+    if (ac->stdout_buf) g_string_free(ac->stdout_buf, TRUE);
+    if (ac->child_watch) g_source_remove(ac->child_watch);
+    if (ac->io_watch) g_source_remove(ac->io_watch);
+    g_spawn_close_pid(ac->child_pid);
+    g_free(ac->cmd);
+    g_free(ac);
+}
+
+static gboolean async_command_stdout_cb(GIOChannel *channel, GIOCondition condition, gpointer data)
+{
+    AsyncCommand *ac = data;
+    if (condition & G_IO_IN) {
+        gchar buf[512];
+        gsize bytes_read;
+        GError *error = NULL;
+        g_io_channel_read_chars(channel, buf, sizeof(buf), &bytes_read, &error);
+        if (!error && bytes_read > 0)
+            g_string_append_len(ac->stdout_buf, buf, bytes_read);
+        else if (error)
+            g_error_free(error);
+    }
+    if (condition & (G_IO_HUP | G_IO_ERR)) {
+        ac->io_watch = 0;
+        return G_SOURCE_REMOVE;
+    }
+    return G_SOURCE_CONTINUE;
+}
+
+static void async_command_child_watch(GPid pid, gint status, gpointer data)
+{
+    AsyncCommand *ac = data;
+    (void)pid;
+    (void)status;
+    if (ac->io_watch) {
+        g_source_remove(ac->io_watch);
+        ac->io_watch = 0;
+    }
+    if (ac->stdout_ch) {
+        GIOStatus stat;
+        do {
+            gchar buf[256];
+            gsize bytes_read;
+            stat = g_io_channel_read_chars(ac->stdout_ch, buf, sizeof(buf), &bytes_read, NULL);
+            if (stat == G_IO_STATUS_NORMAL && bytes_read > 0)
+                g_string_append_len(ac->stdout_buf, buf, bytes_read);
+        } while (stat == G_IO_STATUS_NORMAL);
+    }
+
+    gchar *output = g_string_free(ac->stdout_buf, FALSE);
+    ac->stdout_buf = NULL;
+    g_strstrip(output);
+    if (output && strlen(output) == 0) {
+        g_free(output);
+        output = NULL;
+    }
+
+    ac->callback(output, ac->user_data);
+    g_free(output);
+    async_command_free(ac);
+}
+
+static void
+run_command_async(const gchar *cmd, AsyncCommandCallback callback, gpointer user_data)
+{
+    AsyncCommand *ac = g_new0(AsyncCommand, 1);
+    ac->cmd = g_strdup(cmd);
+    ac->callback = callback;
+    ac->user_data = user_data;
+
+    gchar *shell_cmd = g_strdup_printf("sh -c \"%s\"", cmd);
+    gchar **argv = NULL;
+    GError *error = NULL;
+
+    if (!g_shell_parse_argv(shell_cmd, NULL, &argv, &error)) {
+        GONZO_LOG("async cmd parse error: %s", error->message);
+        g_error_free(error);
+        g_free(shell_cmd);
+        callback(NULL, user_data);
+        g_free(ac);
+        return;
+    }
+    g_free(shell_cmd);
+
+    gint child_stdout = -1;
+    GPid child_pid = 0;
+    gboolean spawned = g_spawn_async_with_pipes(
+        NULL, argv, NULL,
+        G_SPAWN_DO_NOT_REAP_CHILD | G_SPAWN_SEARCH_PATH,
+        NULL, NULL, &child_pid,
+        NULL, &child_stdout, NULL, &error);
+    g_strfreev(argv);
+
+    if (!spawned) {
+        GONZO_LOG("async spawn failed: %s", error->message);
+        g_error_free(error);
+        callback(NULL, user_data);
+        g_free(ac);
+        return;
+    }
+
+    ac->child_pid = child_pid;
+    ac->child_watch = g_child_watch_add(child_pid, async_command_child_watch, ac);
+
+    ac->stdout_ch = g_io_channel_unix_new(child_stdout);
+    g_io_channel_set_encoding(ac->stdout_ch, NULL, NULL);
+    g_io_channel_set_buffered(ac->stdout_ch, FALSE);
+    ac->stdout_buf = g_string_new(NULL);
+    ac->io_watch = g_io_add_watch(ac->stdout_ch, G_IO_IN | G_IO_HUP | G_IO_ERR,
+                                  async_command_stdout_cb, ac);
+}
 
 /* ═══════════════════════════════════════════════════════════════════════
  * UTILITY
  * ═══════════════════════════════════════════════════════════════════════ */
 
 static gchar *
-run_command(const gchar *cmd)
+safe_truncate(const gchar *str, gsize max_len)
 {
-    gchar *output = NULL;
-    GError *error = NULL;
-    gchar *shell_cmd = g_strdup_printf("sh -c \"%s\"", cmd);
-    
-    if (g_spawn_command_line_sync(shell_cmd, &output, NULL, NULL, &error)) {
-        if (output) {
-            g_strstrip(output);
-            if (strlen(output) == 0) {
-                g_free(output);
-                output = NULL;
-            }
-        }
-    } else {
-        if (error) g_error_free(error);
-    }
-    g_free(shell_cmd);
-    return output;
+    if (!str) return NULL;
+    if (strlen(str) <= max_len) return g_strdup(str);
+    return g_strndup(str, max_len);
 }
 
 static void
@@ -350,14 +508,23 @@ apply_styles(void)
         ".status-pill:hover { background: rgba(255,255,255,0.12); }\n"
         ".status-pill:active { background: rgba(255,255,255,0.2); }\n"
         "label { color: #e8eaed; }\n"
-        "scale highlight { background: #8ab4f8; }\n"
+        /*
+         * scale's border/frame comes from the base GTK theme's default
+         * widget styling, not from anything set here. Killing it
+         * explicitly (rather than fighting it with a matching override)
+         * is the one-line fix; the frame is gone regardless of which
+         * color drives the highlight.
+         */
+        "scale { border: none; box-shadow: none; outline: none; background: none; }\n"
+        "scale trough { border: none; box-shadow: none; outline: none; }\n"
+        "scale highlight { background: " GONZO_ACCENT "; border: none; box-shadow: none; }\n"
         "scale contents { background: rgba(255,255,255,0.1); border-radius: 8px; }\n"
         "scale trough { background: rgba(255,255,255,0.2); border-radius: 10px; min-height: 4px; }\n"
         "scale slider { min-width: 22px; min-height: 22px; background: white; border-radius: 50%; box-shadow: 0 2px 8px rgba(0,0,0,0.4); }\n"
         "#PanelCard { background-color: rgba(32, 33, 36, 0.98); border-radius: 38px; padding: 20px 18px 26px; border: 1px solid rgba(255,255,255,0.08); }\n"
         ".tile { background: rgba(255,255,255,0.08); border-radius: 24px; border: none; outline: none; color: white; font-weight: 500; font-size: 13px; transition: background 0.2s, margin 0.1s; box-shadow: 0 2px 6px rgba(0,0,0,0.25); }\n"
         ".tile:active { margin: 2px; background: rgba(255,255,255,0.18); }\n"
-        ".tile.active { background: linear-gradient(145deg, #5b7ef9, #3a56d4); box-shadow: 0 6px 16px rgba(74,108,247,0.5); color: white; }\n"
+        ".tile.active { background: " GONZO_ACCENT "; color: white; }\n"
         ".tile.active label { color: white; }\n"
         ".tile label { font-size: 12px; font-weight: 500; color: rgba(255,255,255,0.9); }\n"
         ".action-btn, .power-btn { background: rgba(255,255,255,0.07); border-radius: 20px; padding: 10px 20px; font-weight: 500; font-size: 14px; color: rgba(255,255,255,0.9); border: none; }\n"
@@ -367,7 +534,6 @@ apply_styles(void)
         "#GonzoMenuAppList, #GonzoMenuAppList row, viewport { background-color: transparent; background-image: none; border: none; box-shadow: none; }\n"
         "#GonzoMenuAppList row:hover { background-color: rgba(255,255,255,0.1); }\n"
         "#GonzoMenuAppList row:selected { background-color: rgba(255,255,255,0.15); }\n"
-        "/* App menu scrollbar: scoped to #GonzoMenu so this CSS doesn't leak to other apps */\n"
         "#GonzoMenu scrollbar { background: transparent; border: none; }\n"
         "#GonzoMenu scrollbar trough { background: transparent; border: none; box-shadow: none; }\n"
         "#GonzoMenu scrollbar slider { background: rgba(255,255,255,0.25); border: none; border-radius: 999px; min-width: 8px; margin: 4px 12px 4px 3px; }\n"
@@ -379,8 +545,8 @@ apply_styles(void)
         "#NotifOuter { background-color: rgba(32, 33, 36, 0.98); border-radius: 38px; border: 1px solid rgba(255,255,255,0.08); }\n"
         "#NotifHeader { padding: 16px; }\n"
         "#NotifTitle { font-size: 16px; font-weight: 500; color: #ffffff; }\n"
-        "#NotifClearBtn { font-size: 13px; color: #8ab4f8; background: rgba(138,180,248,0.1); border: none; border-radius: 20px; padding: 6px 14px; font-weight: 500; }\n"
-        "#NotifClearBtn:hover { background: rgba(138,180,248,0.2); }\n"
+        "#NotifClearBtn { font-size: 13px; color: " GONZO_ACCENT "; background: " GONZO_ACCENT_SOFT "; border: none; border-radius: 20px; padding: 6px 14px; font-weight: 500; }\n"
+        "#NotifClearBtn:hover { background: " GONZO_ACCENT_SOFT_HI "; }\n"
         "#NotifScroll { background: transparent; border: none; }\n"
         "#NotifInnerBox { background: transparent; padding: 4px; }\n"
         "#NotifCard { background: rgba(255,255,255,0.05); border-radius: 22px; margin: 4px 8px; border: 1px solid rgba(255,255,255,0.04); }\n"
@@ -388,7 +554,7 @@ apply_styles(void)
         "#NotifAppBar:hover { background: rgba(255,255,255,0.06); }\n"
         "#NotifAppName { font-size: 15px; font-weight: 500; color: #ffffff; }\n"
         "#NotifAppStatus { font-size: 12px; color: #9aa0a6; }\n"
-        "#NotifBadge { background: #4a6cf7; color: white; border-radius: 20px; padding: 2px 8px; font-size: 12px; font-weight: 600; }\n"
+        "#NotifBadge { background: " GONZO_ACCENT "; color: white; border-radius: 20px; padding: 2px 8px; font-size: 12px; font-weight: 600; }\n"
         "#NotifOptionsBtn, #NotifArrowBtn { background: transparent; border: none; border-radius: 50%; min-width: 32px; min-height: 32px; padding: 0; }\n"
         "#NotifOptionsBtn:hover, #NotifArrowBtn:hover { background: rgba(255,255,255,0.12); }\n"
         "#NotifStack { padding: 12px; }\n"
@@ -413,135 +579,464 @@ apply_styles(void)
  * SYSTEM BACKEND (battery, brightness, volume)
  * ═══════════════════════════════════════════════════════════════════════ */
 
-typedef struct { gchar *status_text; int percentage; } BatteryInfo;
+/* ═══════════════════════════════════════════════════════════════════════
+ * BRIGHTNESS (org.mate.PowerManager.Backlight, session bus)
+ *
+ * GetBrightness/SetBrightness on this interface are already expressed as
+ * a 0-100 percentage — that is precisely why it replaces the helper: the
+ * helper's two-step "read max, scale, clamp, spawn pkexec" dance existed
+ * only to translate raw hardware units into a percentage by hand. A single
+ * D-Bus method call on the session bus does the same job with no spawned
+ * process, no polkit round-trip, and no cached maximum to keep in sync.
+ * ═══════════════════════════════════════════════════════════════════════ */
 
-static BatteryInfo
-get_battery_info(void)
+static void
+backlight_set_brightness_done(GObject *source, GAsyncResult *res, gpointer user_data)
 {
-    BatteryInfo info = { .status_text = g_strdup("no battery"), .percentage = -1 };
-    const char *battery_names[] = { "BAT0", "BAT1", NULL };
-    
-    for (int i = 0; battery_names[i] != NULL; i++) {
-        gchar path[256];
-        snprintf(path, sizeof(path), "/sys/class/power_supply/%s", battery_names[i]);
-        if (!g_file_test(path, G_FILE_TEST_EXISTS)) continue;
-        
-        gchar *capacity_path = g_build_filename(path, "capacity", NULL);
-        gchar *capacity_str = NULL;
-        if (g_file_get_contents(capacity_path, &capacity_str, NULL, NULL)) {
-            g_strstrip(capacity_str);
-            info.percentage = atoi(capacity_str);
-        }
-        g_free(capacity_str);
-        g_free(capacity_path);
-        
-        gchar *status_path = g_build_filename(path, "status", NULL);
-        gchar *status_str = NULL;
-        if (g_file_get_contents(status_path, &status_str, NULL, NULL)) {
-            g_strstrip(status_str);
-            g_free(info.status_text);
-            info.status_text = info.percentage >= 0
-                ? g_strdup_printf("%s %d%%", status_str, info.percentage)
-                : g_strdup(status_str);
-        }
-        g_free(status_str);
-        g_free(status_path);
-        return info;
-    }
-    return info;
-}
-
-static gboolean g_backlight_helper_pending = FALSE;
-
-static int
-run_backlight_helper_sync(const char *arg)
-{
-    gchar *cmd = g_strdup_printf("/usr/sbin/mate-power-backlight-helper %s", arg);
-    gchar *out = NULL;
+    (void)user_data;
     GError *error = NULL;
-    if (!g_spawn_command_line_sync(cmd, &out, NULL, NULL, &error)) {
-        if (error) g_error_free(error);
-        g_free(cmd);
-        g_free(out);
-        return -1;
+    GVariant *ret = g_dbus_proxy_call_finish(G_DBUS_PROXY(source), res, &error);
+    if (!ret) {
+        GONZO_LOG("SetBrightness failed: %s", error->message);
+        g_error_free(error);
+        return;
     }
-    g_free(cmd);
-    int result = out ? atoi(g_strstrip(out)) : -1;
-    g_free(out);
-    return result;
-}
-
-static double
-get_brightness_percent(void)
-{
-    int current = run_backlight_helper_sync("--get-brightness");
-    int maximum = run_backlight_helper_sync("--get-max-brightness");
-    if (current < 0 || maximum <= 0) return 50.0;
-    return CLAMP(((double)current / (double)maximum) * 100.0, 0.0, 100.0);
+    g_variant_unref(ret);
 }
 
 static void
-on_backlight_helper_finished(GPid pid, gint status, gpointer user_data)
+set_brightness_percent_async(int percent)
 {
-    (void)status; (void)user_data;
-    g_spawn_close_pid(pid);
-    g_backlight_helper_pending = FALSE;
+    if (!g_shell->backlight_proxy) return;
+    guint32 value = (guint32)CLAMP(percent, 0, 100);
+    g_dbus_proxy_call(g_shell->backlight_proxy, "SetBrightness",
+                      g_variant_new("(u)", value),
+                      G_DBUS_CALL_FLAGS_NONE, -1, NULL,
+                      backlight_set_brightness_done, NULL);
 }
 
 static void
-set_brightness_percent(int percent)
+backlight_get_brightness_done(GObject *source, GAsyncResult *res, gpointer user_data)
 {
-    /* Only one helper invocation at a time – slider fires on every tick */
-    if (g_backlight_helper_pending) return;
-    int maximum = run_backlight_helper_sync("--get-max-brightness");
-    if (maximum <= 0) return;
-
-    int value = (int)((percent / 100.0) * maximum);
-    value = CLAMP(value, 1, maximum);
-
-    gchar *cmd = g_strdup_printf(
-        "pkexec /usr/sbin/mate-power-backlight-helper --set-brightness %d", value);
-    gchar **argv = NULL;
+    (void)user_data;
     GError *error = NULL;
-    GPid child_pid = 0;
-    if (g_shell_parse_argv(cmd, NULL, &argv, NULL) &&
-        g_spawn_async(NULL, argv, NULL,
-                      G_SPAWN_DO_NOT_REAP_CHILD | G_SPAWN_SEARCH_PATH,
-                      NULL, NULL, &child_pid, &error)) {
-        g_backlight_helper_pending = TRUE;
-        g_child_watch_add(child_pid, on_backlight_helper_finished, NULL);
-    } else {
-        if (error) g_error_free(error);
+    GVariant *ret = g_dbus_proxy_call_finish(G_DBUS_PROXY(source), res, &error);
+    if (!ret) {
+        GONZO_LOG("GetBrightness failed: %s", error->message);
+        g_error_free(error);
+        return;
     }
-    if (argv) g_strfreev(argv);
-    g_free(cmd);
+    guint32 value = 0;
+    g_variant_get(ret, "(u)", &value);
+    g_variant_unref(ret);
+
+    if (g_shell->brightness_slider) {
+        g_signal_handlers_block_by_func(g_shell->brightness_slider,
+            G_CALLBACK(on_brightness_slider_changed), NULL);
+        gtk_range_set_value(GTK_RANGE(g_shell->brightness_slider), CLAMP(value, 0, 100));
+        g_signal_handlers_unblock_by_func(g_shell->brightness_slider,
+            G_CALLBACK(on_brightness_slider_changed), NULL);
+    }
+}
+
+static void
+refresh_brightness_slider(void)
+{
+    if (!g_shell->brightness_slider || !g_shell->backlight_proxy) return;
+    g_dbus_proxy_call(g_shell->backlight_proxy, "GetBrightness",
+                      NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL,
+                      backlight_get_brightness_done, NULL);
+}
+
+static void
+on_backlight_signal(GDBusProxy *proxy, const gchar *sender, const gchar *signal_name,
+                    GVariant *parameters, gpointer user_data)
+{
+    (void)proxy; (void)sender; (void)user_data;
+    if (g_strcmp0(signal_name, "BrightnessChanged") != 0) return;
+    guint32 value = 0;
+    g_variant_get(parameters, "(u)", &value);
+    if (g_shell->brightness_slider) {
+        g_signal_handlers_block_by_func(g_shell->brightness_slider,
+            G_CALLBACK(on_brightness_slider_changed), NULL);
+        gtk_range_set_value(GTK_RANGE(g_shell->brightness_slider), CLAMP(value, 0, 100));
+        g_signal_handlers_unblock_by_func(g_shell->brightness_slider,
+            G_CALLBACK(on_brightness_slider_changed), NULL);
+    }
+}
+
+static void
+backlight_init(void)
+{
+    GError *error = NULL;
+    g_shell->backlight_proxy = g_dbus_proxy_new_for_bus_sync(
+        G_BUS_TYPE_SESSION, G_DBUS_PROXY_FLAGS_NONE, NULL,
+        "org.mate.PowerManager",
+        "/org/mate/PowerManager/Backlight",
+        "org.mate.PowerManager.Backlight", NULL, &error);
+
+    if (!g_shell->backlight_proxy) {
+        GONZO_LOG("mate-power-manager Backlight proxy failed (%s); brightness control disabled",
+                  error ? error->message : "unknown error");
+        if (error) g_error_free(error);
+        return;
+    }
+
+    g_signal_connect(g_shell->backlight_proxy, "g-signal",
+                     G_CALLBACK(on_backlight_signal), NULL);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+ * AUDIO (libmatemixer with async amixer fallback)
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+static gboolean
+audio_has_volume(void)
+{
+    if (!g_shell->audio_control) return FALSE;
+    MateMixerStreamControlFlags flags =
+        mate_mixer_stream_control_get_flags(g_shell->audio_control);
+    return (flags & MATE_MIXER_STREAM_CONTROL_VOLUME_READABLE) != 0 &&
+           (flags & MATE_MIXER_STREAM_CONTROL_VOLUME_WRITABLE) != 0;
+}
+
+static gboolean
+audio_has_mute(void)
+{
+    if (!g_shell->audio_control) return FALSE;
+    return (mate_mixer_stream_control_get_flags(g_shell->audio_control)
+            & MATE_MIXER_STREAM_CONTROL_MUTE_READABLE) != 0;
 }
 
 static int
 get_volume_percent(void)
 {
-    gchar *output = run_command("amixer sget Master | grep -oP '\\[\\d+%\\]' | head -1 | tr -d '[]%'");
-    int percent = output ? atoi(output) : 50;
-    g_free(output);
-    return CLAMP(percent, 0, 100);
+    if (audio_has_volume()) {
+        MateMixerStreamControl *c = g_shell->audio_control;
+        guint min = mate_mixer_stream_control_get_min_volume(c);
+        guint max = mate_mixer_stream_control_get_max_volume(c);
+        if (max > min) {
+            guint v = mate_mixer_stream_control_get_volume(c);
+            if (v < min) v = min;
+            if (v > max) v = max;
+            return CLAMP((int)((((gdouble)(v - min)) / (max - min)) * 100.0 + 0.5), 0, 100);
+        }
+    }
+    return 50;
 }
 
 static gboolean
 get_mute_state(void)
 {
-    gchar *output = run_command("amixer sget Master | grep -oP '\\[(on|off)\\]' | head -1 | tr -d '[]'");
-    gboolean muted = (output != NULL && g_strcmp0(output, "off") == 0);
-    g_free(output);
-    return muted;
+    if (audio_has_mute())
+        return mate_mixer_stream_control_get_mute(g_shell->audio_control);
+    return FALSE;
 }
 
 static void
 set_volume_percent(int percent)
 {
     percent = CLAMP(percent, 0, 100);
+    if (audio_has_volume()) {
+        MateMixerStreamControl *c = g_shell->audio_control;
+        guint min = mate_mixer_stream_control_get_min_volume(c);
+        guint max = mate_mixer_stream_control_get_max_volume(c);
+        if (max > min) {
+            guint v = (guint)(min + ((max - min) * (percent / 100.0)) + 0.5);
+            mate_mixer_stream_control_set_volume(c, v);
+            return;
+        }
+    }
     gchar *cmd = g_strdup_printf("amixer sset Master %d%% 2>/dev/null", percent);
     g_spawn_command_line_async(cmd, NULL);
     g_free(cmd);
+}
+
+static void
+volume_fallback_async_cb(const gchar *output, gpointer user_data)
+{
+    (void)user_data;
+    g_shell->volume_fallback_pending = FALSE;
+    if (!output) return;
+
+    int percent = 50;
+    gboolean muted = FALSE;
+    gchar **lines = g_strsplit(output, "\n", 0);
+    for (int i = 0; lines[i]; i++) {
+        if (strstr(lines[i], "Playback") && strstr(lines[i], "%")) {
+            gchar *p = strstr(lines[i], "[");
+            if (p) {
+                p++;
+                char *end = strchr(p, '%');
+                if (end) {
+                    *end = '\0';
+                    percent = atoi(p);
+                }
+            }
+        }
+        if (strstr(lines[i], "off")) muted = TRUE;
+        if (strstr(lines[i], "on"))  muted = FALSE;
+    }
+    g_strfreev(lines);
+
+    percent = CLAMP(percent, 0, 100);
+
+    if (g_shell->volume_slider) {
+        g_signal_handlers_block_by_func(g_shell->volume_slider,
+            G_CALLBACK(on_volume_slider_changed), NULL);
+        gtk_range_set_value(GTK_RANGE(g_shell->volume_slider), percent);
+        g_signal_handlers_unblock_by_func(g_shell->volume_slider,
+            G_CALLBACK(on_volume_slider_changed), NULL);
+    }
+    if (g_shell->volume_icon) {
+        const char *icon_name;
+        if (muted) icon_name = "audio-volume-muted-symbolic";
+        else if (percent > 70) icon_name = "audio-volume-high-symbolic";
+        else if (percent > 30) icon_name = "audio-volume-medium-symbolic";
+        else icon_name = "audio-volume-low-symbolic";
+        gtk_image_set_from_icon_name(GTK_IMAGE(g_shell->volume_icon), icon_name, GTK_ICON_SIZE_DND);
+        gtk_image_set_pixel_size(GTK_IMAGE(g_shell->volume_icon), PANEL_ICON_PIXELS);
+    }
+}
+
+static void
+refresh_volume_ui_fallback_async(void)
+{
+    if (g_shell->volume_fallback_pending) return;
+    g_shell->volume_fallback_pending = TRUE;
+    run_command_async("amixer sget Master", volume_fallback_async_cb, NULL);
+}
+
+static void
+update_volume_icon_display(void)
+{
+    if (!g_shell->volume_icon) return;
+    if (!audio_has_volume() && !g_shell->volume_fallback_pending) {
+        refresh_volume_ui_fallback_async();
+        return;
+    }
+    gboolean muted = get_mute_state();
+    int volume = get_volume_percent();
+    const char *icon_name;
+    if (muted) icon_name = "audio-volume-muted-symbolic";
+    else if (volume > 70) icon_name = "audio-volume-high-symbolic";
+    else if (volume > 30) icon_name = "audio-volume-medium-symbolic";
+    else icon_name = "audio-volume-low-symbolic";
+    
+    gtk_image_set_from_icon_name(GTK_IMAGE(g_shell->volume_icon), icon_name, GTK_ICON_SIZE_DND);
+    gtk_image_set_pixel_size(GTK_IMAGE(g_shell->volume_icon), PANEL_ICON_PIXELS);
+}
+
+static void
+refresh_volume_ui(void)
+{
+    if (audio_has_volume()) {
+        if (g_shell->volume_slider) {
+            g_signal_handlers_block_by_func(g_shell->volume_slider,
+                G_CALLBACK(on_volume_slider_changed), NULL);
+            gtk_range_set_value(GTK_RANGE(g_shell->volume_slider), get_volume_percent());
+            g_signal_handlers_unblock_by_func(g_shell->volume_slider,
+                G_CALLBACK(on_volume_slider_changed), NULL);
+        }
+        update_volume_icon_display();
+    } else {
+        refresh_volume_ui_fallback_async();
+    }
+}
+
+static void
+on_audio_control_changed(GObject *object, GParamSpec *pspec, gpointer user_data)
+{
+    (void)object; (void)pspec; (void)user_data;
+    refresh_volume_ui();
+}
+
+static void
+audio_bind_default_control(void)
+{
+    if (g_shell->audio_control) {
+        g_signal_handlers_disconnect_by_func(g_shell->audio_control,
+            G_CALLBACK(on_audio_control_changed), NULL);
+        g_object_unref(g_shell->audio_control);
+        g_shell->audio_control = NULL;
+    }
+
+    MateMixerStream *stream =
+        mate_mixer_context_get_default_output_stream(g_shell->audio_context);
+    if (!stream) return;
+
+    MateMixerStreamControl *ctrl = mate_mixer_stream_get_default_control(stream);
+    if (!ctrl) return;
+
+    g_shell->audio_control = g_object_ref(ctrl);
+    g_signal_connect(ctrl, "notify::volume", G_CALLBACK(on_audio_control_changed), NULL);
+    g_signal_connect(ctrl, "notify::mute",   G_CALLBACK(on_audio_control_changed), NULL);
+    refresh_volume_ui();
+}
+
+static void
+on_audio_context_state_notify(GObject *object, GParamSpec *pspec, gpointer user_data)
+{
+    (void)object; (void)pspec; (void)user_data;
+    if (mate_mixer_context_get_state(g_shell->audio_context) == MATE_MIXER_STATE_READY)
+        audio_bind_default_control();
+}
+
+static void
+on_audio_default_stream_notify(GObject *object, GParamSpec *pspec, gpointer user_data)
+{
+    (void)object; (void)pspec; (void)user_data;
+    audio_bind_default_control();
+}
+
+static void
+audio_init(void)
+{
+    if (!mate_mixer_init()) {
+        GONZO_LOG("libmatemixer init failed; volume falls back to amixer");
+        return;
+    }
+
+    g_shell->audio_context = mate_mixer_context_new();
+    mate_mixer_context_set_app_name(g_shell->audio_context, "Gonzo Shell");
+
+    if (!mate_mixer_context_open(g_shell->audio_context)) {
+        GONZO_LOG("no libmatemixer backend available; volume falls back to amixer");
+        g_object_unref(g_shell->audio_context);
+        g_shell->audio_context = NULL;
+        return;
+    }
+
+    g_signal_connect(g_shell->audio_context, "notify::state",
+                     G_CALLBACK(on_audio_context_state_notify), NULL);
+    g_signal_connect(g_shell->audio_context, "notify::default-output-stream",
+                     G_CALLBACK(on_audio_default_stream_notify), NULL);
+
+    if (mate_mixer_context_get_state(g_shell->audio_context) == MATE_MIXER_STATE_READY)
+        audio_bind_default_control();
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+ * POWER (UPower)
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+static const gchar *
+battery_icon_for_percentage(int percent, gboolean charging)
+{
+    if (charging) return "battery-good-charging-symbolic";
+    if (percent >= 95) return "battery-full-symbolic";
+    if (percent >= 60) return "battery-good-symbolic";
+    if (percent >= 30) return "battery-low-symbolic";
+    if (percent >= 10) return "battery-caution-symbolic";
+    return "battery-empty-symbolic";
+}
+
+static void
+refresh_battery_ui(void)
+{
+    if (!g_shell->battery_label || !g_shell->battery_icon || !g_shell->battery_box) return;
+
+    if (!g_shell->upower_proxy) {
+        GONZO_LOG("refresh_battery_ui: no UPower proxy; hiding battery indicator");
+        gtk_widget_set_visible(g_shell->battery_box, FALSE);
+        if (g_shell->shelf_battery_icon) gtk_widget_set_visible(g_shell->shelf_battery_icon, FALSE);
+        return;
+    }
+
+    GVariant *present_v = g_dbus_proxy_get_cached_property(g_shell->upower_proxy, "IsPresent");
+    gboolean present = present_v ? g_variant_get_boolean(present_v) : FALSE;
+    if (present_v) g_variant_unref(present_v);
+
+    gtk_widget_set_visible(g_shell->battery_box, present);
+    if (g_shell->shelf_battery_icon) gtk_widget_set_visible(g_shell->shelf_battery_icon, present);
+    if (!present) return;
+
+    GVariant *pct_v = g_dbus_proxy_get_cached_property(g_shell->upower_proxy, "Percentage");
+    int percent = pct_v ? (int)(g_variant_get_double(pct_v) + 0.5) : 0;
+    if (pct_v) g_variant_unref(pct_v);
+
+    GVariant *state_v = g_dbus_proxy_get_cached_property(g_shell->upower_proxy, "State");
+    guint32 state = state_v ? g_variant_get_uint32(state_v) : 0;
+    if (state_v) g_variant_unref(state_v);
+
+    gboolean charging = (state == 1 || state == 5);
+
+    const gchar *icon = NULL;
+    GVariant *icon_v = g_dbus_proxy_get_cached_property(g_shell->upower_proxy, "IconName");
+    if (icon_v) {
+        const gchar *name = g_variant_get_string(icon_v, NULL);
+        if (name && *name && gtk_icon_theme_has_icon(gtk_icon_theme_get_default(), name))
+            icon = name;
+    }
+    const gchar *resolved_icon = icon ? icon : battery_icon_for_percentage(percent, charging);
+
+    gtk_image_set_from_icon_name(GTK_IMAGE(g_shell->battery_icon), resolved_icon, GTK_ICON_SIZE_MENU);
+    gtk_image_set_pixel_size(GTK_IMAGE(g_shell->battery_icon), 18);
+    if (icon_v) g_variant_unref(icon_v);
+
+    gchar *text = g_strdup_printf("%d%%", CLAMP(percent, 0, 100));
+    gtk_label_set_text(GTK_LABEL(g_shell->battery_label), text);
+    g_free(text);
+
+    const gchar *tooltip = state == 4 ? "Fully charged" : (charging ? "Charging" : "On battery");
+    gtk_widget_set_tooltip_text(g_shell->battery_box, tooltip);
+
+    if (g_shell->shelf_battery_icon) {
+        gtk_image_set_from_icon_name(GTK_IMAGE(g_shell->shelf_battery_icon), resolved_icon, GTK_ICON_SIZE_MENU);
+        gtk_image_set_pixel_size(GTK_IMAGE(g_shell->shelf_battery_icon), 15);
+        gchar *shelf_tip = g_strdup_printf("%s — %d%%", tooltip, CLAMP(percent, 0, 100));
+        gtk_widget_set_tooltip_text(g_shell->shelf_battery_icon, shelf_tip);
+        g_free(shelf_tip);
+    }
+}
+
+static void
+on_upower_properties_changed(GDBusProxy *proxy, GVariant *changed,
+                             GStrv invalidated, gpointer user_data)
+{
+    (void)proxy; (void)changed; (void)invalidated; (void)user_data;
+    refresh_battery_ui();
+}
+
+static void
+battery_init(void)
+{
+    GError *error = NULL;
+    g_shell->upower_proxy = g_dbus_proxy_new_for_bus_sync(
+        G_BUS_TYPE_SYSTEM, G_DBUS_PROXY_FLAGS_NONE, NULL,
+        "org.freedesktop.UPower",
+        "/org/freedesktop/UPower/devices/DisplayDevice",
+        "org.freedesktop.UPower.Device", NULL, &error);
+
+    if (!g_shell->upower_proxy) {
+        GONZO_LOG("UPower proxy failed (%s); battery falls back to sysfs",
+                  error ? error->message : "unknown error");
+        if (error) g_error_free(error);
+        return;
+    }
+
+    gchar *owner = g_dbus_proxy_get_name_owner(g_shell->upower_proxy);
+    if (!owner) {
+        GONZO_LOG("upowerd not running; battery falls back to sysfs");
+        g_object_unref(g_shell->upower_proxy);
+        g_shell->upower_proxy = NULL;
+        return;
+    }
+    g_free(owner);
+
+    g_signal_connect(g_shell->upower_proxy, "g-properties-changed",
+                     G_CALLBACK(on_upower_properties_changed), NULL);
+
+    /*
+     * battery_box does not exist yet at this call site (it's built later
+     * in create_quick_settings_panel, which does its own initial refresh).
+     * This call is here so battery_init() stays correct on its own terms:
+     * if the panel is ever built before the proxy, or the proxy is ever
+     * created asynchronously, the indicator still gets populated the
+     * moment the proxy becomes ready. refresh_battery_ui() no-ops safely
+     * when the widgets aren't built yet.
+     */
+    refresh_battery_ui();
 }
 
 /* ═══════════════════════════════════════════════════════════════════════
@@ -558,18 +1053,99 @@ compare_app_groups(gconstpointer a, gconstpointer b)
     return g_strcmp0(ga->app_name, gb->app_name);
 }
 
+static GDesktopAppInfo *
+find_desktop_entry_for_token(const gchar *token)
+{
+    if (!token || !*token) return NULL;
+    if (strlen(token) > NOTIF_MAX_STRING_LENGTH) return NULL;
+
+    gchar *lower = g_ascii_strdown(token, -1);
+    gchar *dashed = g_strdup(lower);
+    for (gchar *p = dashed; *p; p++) if (*p == '_' || *p == ' ') *p = '-';
+
+    const gchar *stems[] = { token, lower, dashed };
+    GDesktopAppInfo *app = NULL;
+
+    for (guint i = 0; i < G_N_ELEMENTS(stems) && !app; i++) {
+        gchar *id = g_str_has_suffix(stems[i], ".desktop")
+                    ? g_strdup(stems[i])
+                    : g_strdup_printf("%s.desktop", stems[i]);
+        app = g_desktop_app_info_new(id);
+        g_free(id);
+    }
+
+    g_free(dashed);
+    g_free(lower);
+    return app;
+}
+
+static void
+resolve_notification_app_identity(const gchar *app_name, const gchar *desktop_hint,
+                                  const gchar *app_icon,
+                                  gchar **out_name, gchar **out_icon,
+                                  gchar **out_desktop_id)
+{
+    *out_name = NULL;
+    *out_icon = NULL;
+    if (out_desktop_id) *out_desktop_id = NULL;
+
+    GDesktopAppInfo *app = find_desktop_entry_for_token(desktop_hint);
+    if (!app) app = find_desktop_entry_for_token(app_name);
+
+    if (app) {
+        const gchar *name = g_app_info_get_display_name(G_APP_INFO(app));
+        if (name && *name) *out_name = g_strdup(name);
+
+        GIcon *icon = g_app_info_get_icon(G_APP_INFO(app));
+        if (icon) {
+            gchar *icon_str = g_icon_to_string(icon);
+            if (icon_str && *icon_str) *out_icon = icon_str;
+            else g_free(icon_str);
+        }
+        if (out_desktop_id) {
+            const gchar *id = g_app_info_get_id(G_APP_INFO(app));
+            if (id) *out_desktop_id = g_strdup(id);
+        }
+        g_object_unref(app);
+    }
+
+    if (!*out_name)
+        *out_name = safe_truncate((app_name && *app_name) ? app_name : "Unknown App",
+                                  NOTIF_MAX_STRING_LENGTH);
+
+    if (!*out_icon && app_icon && *app_icon)
+        *out_icon = safe_truncate(app_icon, NOTIF_MAX_STRING_LENGTH);
+
+    GtkIconTheme *theme = gtk_icon_theme_get_default();
+    if (!*out_icon ||
+        (!g_path_is_absolute(*out_icon) && !gtk_icon_theme_has_icon(theme, *out_icon))) {
+        g_free(*out_icon);
+        *out_icon = g_strdup("application-x-executable");
+    }
+}
+
 static AppNotificationGroup*
-find_or_create_app_group(const gchar *app_id, const gchar *app_name, const gchar *app_icon)
+find_app_group(const gchar *app_id)
 {
     for (GList *l = g_shell->app_groups; l; l = l->next) {
         AppNotificationGroup *group = l->data;
         if (g_strcmp0(group->app_id, app_id) == 0) return group;
     }
-    
+    return NULL;
+}
+
+static AppNotificationGroup*
+find_or_create_app_group(const gchar *app_id, const gchar *app_name, const gchar *app_icon,
+                         const gchar *desktop_id)
+{
+    AppNotificationGroup *existing = find_app_group(app_id);
+    if (existing) return existing;
+
     AppNotificationGroup *group = g_new0(AppNotificationGroup, 1);
     group->app_id = g_strdup(app_id ? app_id : "unknown");
-    group->app_name = g_strdup(app_name ? app_name : "Unknown App");
+    group->app_name = safe_truncate(app_name, NOTIF_MAX_STRING_LENGTH);
     group->app_icon = g_strdup(app_icon ? app_icon : "application-x-executable");
+    group->desktop_id = desktop_id ? g_strdup(desktop_id) : NULL;
     group->collapsed = FALSE;
     g_shell->app_groups = g_list_prepend(g_shell->app_groups, group);
     return group;
@@ -581,11 +1157,11 @@ create_notification(guint32 id, const gchar *app_name, const gchar *app_icon,
 {
     Notification *notif = g_new0(Notification, 1);
     notif->id = id;
-    notif->app_name = g_strdup(app_name);
-    notif->app_icon = g_strdup(app_icon);
-    notif->summary = g_strdup(summary);
-    notif->body = g_strdup(body);
-    notif->sender = g_strdup(sender ? sender : app_name);
+    notif->app_name = safe_truncate(app_name, NOTIF_MAX_STRING_LENGTH);
+    notif->app_icon = safe_truncate(app_icon, NOTIF_MAX_STRING_LENGTH);
+    notif->summary = safe_truncate(summary, NOTIF_MAX_STRING_LENGTH);
+    notif->body = safe_truncate(body, NOTIF_MAX_STRING_LENGTH);
+    notif->sender = safe_truncate(sender ? sender : app_name, NOTIF_MAX_STRING_LENGTH);
     notif->timestamp = time(NULL);
     return notif;
 }
@@ -631,9 +1207,9 @@ format_timestamp(gint64 timestamp)
     time_t now = time(NULL);
     gint64 diff = now - timestamp;
     if (diff < 60) return g_strdup("Just now");
-    if (diff < 3600) return g_strdup_printf("%lld min ago", diff / 60);
-    if (diff < 86400) return g_strdup_printf("%lld hours ago", diff / 3600);
-    return g_strdup_printf("%lld days ago", diff / 86400);
+    if (diff < 3600) return g_strdup_printf("%ld min ago", (long)(diff / 60));
+    if (diff < 86400) return g_strdup_printf("%ld hours ago", (long)(diff / 3600));
+    return g_strdup_printf("%ld days ago", (long)(diff / 86400));
 }
 
 static void
@@ -646,6 +1222,7 @@ on_clear_all_clicked(GtkWidget *button, gpointer user_data)
 static void
 on_app_bar_clicked(GtkWidget *widget, gpointer user_data)
 {
+    (void)widget;
     AppNotificationGroup *group = user_data;
     group->collapsed = !group->collapsed;
     if (group->stack_widget)
@@ -658,17 +1235,41 @@ on_app_bar_clicked(GtkWidget *widget, gpointer user_data)
 }
 
 static void
+quit_app_by_desktop_id(const gchar *desktop_id)
+{
+    if (!desktop_id || !*desktop_id) return;
+    GtkWidget *dock_widget = identity_lookup(desktop_id);
+    if (dock_widget)
+        close_app_action_widget(dock_widget);
+}
+
+static void
 on_quit_app_clicked(GtkWidget *item, gpointer user_data)
 {
-    const gchar *app_name = user_data;
-    gchar *cmd = g_strdup_printf("pkill -f '%s' 2>/dev/null", app_name);
-    g_spawn_command_line_async(cmd, NULL);
-    g_free(cmd);
+    (void)item;
+    AppNotificationGroup *group = user_data;
+    if (group->desktop_id) {
+        quit_app_by_desktop_id(group->desktop_id);
+        return;
+    }
+    GList *children = gtk_container_get_children(GTK_CONTAINER(g_shell->dock_box));
+    for (GList *l = children; l; l = l->next) {
+        GtkWidget *child = GTK_WIDGET(l->data);
+        GAppInfo *app = G_APP_INFO(g_object_get_data(G_OBJECT(child), "app_info"));
+        if (!app) continue;
+        const gchar *name = g_app_info_get_display_name(app);
+        if (name && g_strcmp0(name, group->app_name) == 0) {
+            close_app_action_widget(child);
+            break;
+        }
+    }
+    g_list_free(children);
 }
 
 static void
 on_mute_app_clicked(GtkWidget *item, gpointer user_data)
 {
+    (void)item;
     GONZO_LOG("Mute notifications for %s", (char*)user_data);
 }
 
@@ -677,30 +1278,19 @@ on_app_options_clicked(GtkWidget *button, gpointer user_data)
 {
     AppNotificationGroup *group = user_data;
     
-    /*
-     * If the app exposes a dbusmenu, we draw it ourselves so it can
-     * stack above our override-redirect panels.  The app's own
-     * ContextMenu method draws a WM-managed window that lands beneath
-     * the panels and is invisible.
-     */
     if (group->dbus_menu) {
         gtk_menu_popup_at_widget(GTK_MENU(group->dbus_menu), button,
                                  GDK_GRAVITY_SOUTH_EAST, GDK_GRAVITY_NORTH_EAST, NULL);
         return;
     }
     
-    /*
-     * Fallback: ask the app to show its own menu via ContextMenu(x,y).
-     * Position hint computed correctly (translate coordinates to root)
-     * so it appears near the button instead of far off-screen.
-     */
     if (group->has_tray_item && group->sender_bus_name && group->object_path) {
         GtkWidget *toplevel = gtk_widget_get_toplevel(button);
         gint local_x = 0, local_y = 0;
         gtk_widget_translate_coordinates(button, toplevel, 0, 0, &local_x, &local_y);
         GtkAllocation btn_alloc;
         gtk_widget_get_allocation(button, &btn_alloc);
-        local_y += btn_alloc.height;   /* bottom edge of the button */
+        local_y += btn_alloc.height;
         
         GdkWindow *top_win = gtk_widget_get_window(toplevel);
         gint origin_x = 0, origin_y = 0;
@@ -719,14 +1309,13 @@ on_app_options_clicked(GtkWidget *button, gpointer user_data)
         return;
     }
     
-    /* Pure notification group (no tray item) – GonzOS-provided menu */
     GtkWidget *menu = gtk_menu_new();
     GtkWidget *mute_item = gtk_menu_item_new_with_label("Mute Notifications");
     g_signal_connect(mute_item, "activate", G_CALLBACK(on_mute_app_clicked), group->app_name);
     gtk_menu_shell_append(GTK_MENU_SHELL(menu), mute_item);
     gtk_menu_shell_append(GTK_MENU_SHELL(menu), gtk_separator_menu_item_new());
     GtkWidget *quit_item = gtk_menu_item_new_with_label("Quit App");
-    g_signal_connect(quit_item, "activate", G_CALLBACK(on_quit_app_clicked), group->app_name);
+    g_signal_connect(quit_item, "activate", G_CALLBACK(on_quit_app_clicked), group);
     gtk_menu_shell_append(GTK_MENU_SHELL(menu), quit_item);
     gtk_widget_show_all(menu);
     gtk_menu_popup_at_widget(GTK_MENU(menu), button,
@@ -781,6 +1370,15 @@ create_app_card(AppNotificationGroup *group)
         GdkPixbuf *scaled = gdk_pixbuf_scale_simple(group->icon_pixbuf, 36, 36, GDK_INTERP_BILINEAR);
         icon = gtk_image_new_from_pixbuf(scaled);
         if (scaled) g_object_unref(scaled);
+    } else if (group->app_icon && g_path_is_absolute(group->app_icon)) {
+        GdkPixbuf *pb = gdk_pixbuf_new_from_file_at_size(group->app_icon, 36, 36, NULL);
+        if (pb) {
+            icon = gtk_image_new_from_pixbuf(pb);
+            g_object_unref(pb);
+        } else {
+            icon = gtk_image_new_from_icon_name("application-x-executable", GTK_ICON_SIZE_DND);
+            gtk_image_set_pixel_size(GTK_IMAGE(icon), 36);
+        }
     } else {
         icon = gtk_image_new_from_icon_name(group->app_icon, GTK_ICON_SIZE_DND);
         gtk_image_set_pixel_size(GTK_IMAGE(icon), 36);
@@ -911,7 +1509,6 @@ create_notification_center(void)
     gtk_widget_set_name(scroll, "NotifScroll");
     gtk_scrolled_window_set_shadow_type(GTK_SCROLLED_WINDOW(scroll), GTK_SHADOW_NONE);
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroll), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
-    /* Propagate natural height so the scrolled window can grow with content */
     gtk_scrolled_window_set_propagate_natural_height(GTK_SCROLLED_WINDOW(scroll), TRUE);
     
     g_shell->notif_inner_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
@@ -939,7 +1536,8 @@ static void
 on_brightness_slider_changed(GtkRange *range, gpointer user_data)
 {
     (void)user_data;
-    set_brightness_percent((int)round(gtk_range_get_value(range)));
+    int val = (int)round(gtk_range_get_value(range));
+    set_brightness_percent_async(val);
 }
 
 static void
@@ -949,12 +1547,236 @@ on_volume_slider_changed(GtkRange *range, gpointer user_data)
     set_volume_percent((int)round(gtk_range_get_value(range)));
 }
 
+/* ═══════════════════════════════════════════════════════════════════════
+ * WI-FI STATE (async)
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+typedef struct {
+    WifiState  state;
+    gint       signal;
+    gchar     *ssid;
+} WifiStatus;
+
+static gchar **
+nmcli_split_fields(const gchar *line)
+{
+    GPtrArray *fields = g_ptr_array_new();
+    GString *cur = g_string_new(NULL);
+
+    for (const gchar *p = line; *p; p++) {
+        if (*p == '\\' && p[1]) { g_string_append_c(cur, *++p); continue; }
+        if (*p == ':') {
+            g_ptr_array_add(fields, g_strdup(cur->str));
+            g_string_truncate(cur, 0);
+            continue;
+        }
+        g_string_append_c(cur, *p);
+    }
+    g_ptr_array_add(fields, g_strdup(cur->str));
+    g_ptr_array_add(fields, NULL);
+
+    g_string_free(cur, TRUE);
+    return (gchar **)g_ptr_array_free(fields, FALSE);
+}
+
+static void
+wifi_status_from_output(const gchar *raw, WifiStatus *out)
+{
+    out->state = WIFI_OFF;
+    out->signal = 0;
+    out->ssid = NULL;
+    if (!raw) return;
+
+    gchar **lines = g_strsplit(raw, "\n", -1);
+    int section = 0;
+
+    for (int i = 0; lines[i]; i++) {
+        gchar *line = g_strstrip(lines[i]);
+        if (g_strcmp0(line, "@") == 0) { section++; continue; }
+        if (!*line) continue;
+
+        if (section == 0) {
+            if (g_strcmp0(line, "enabled") == 0) out->state = WIFI_DISCONNECTED;
+            continue;
+        }
+        if (out->state == WIFI_OFF) continue;
+
+        if (section == 1) {
+            gchar **f = nmcli_split_fields(line);
+            if (f[0] && f[1] && g_strcmp0(f[0], "wifi") == 0) {
+                if (g_str_has_prefix(f[1], "connecting")) {
+                    out->state = WIFI_CONNECTING;
+                } else if (g_strcmp0(f[1], "connected") == 0 && out->state != WIFI_CONNECTING) {
+                    out->state = WIFI_CONNECTED;
+                    g_free(out->ssid);
+                    out->ssid = g_strdup(f[2] ? f[2] : "");
+                }
+            }
+            g_strfreev(f);
+            continue;
+        }
+
+        gchar **f = nmcli_split_fields(line);
+        if (f[0] && f[1] && g_strcmp0(f[0], "*") == 0)
+            out->signal = CLAMP(atoi(f[1]), 0, 100);
+        g_strfreev(f);
+    }
+
+    g_strfreev(lines);
+    if (out->state == WIFI_CONNECTED && (!out->ssid || !*out->ssid)) {
+        g_free(out->ssid);
+        out->ssid = NULL;
+        out->state = WIFI_DISCONNECTED;
+    }
+}
+
+static const gchar *
+wifi_icon_for_signal(gint signal)
+{
+    if (signal >= 80) return "network-wireless-signal-excellent-symbolic";
+    if (signal >= 55) return "network-wireless-signal-good-symbolic";
+    if (signal >= 30) return "network-wireless-signal-ok-symbolic";
+    if (signal >=  5) return "network-wireless-signal-weak-symbolic";
+    return "network-wireless-signal-none-symbolic";
+}
+
+static void
+apply_wifi_status(const WifiStatus *st)
+{
+    if (!g_shell->wifi_tile) return;
+
+    g_shell->wifi_state = st->state;
+    g_shell->wifi_enabled = (st->state != WIFI_OFF);
+
+    gboolean connecting = (st->state == WIFI_CONNECTING);
+
+    gtk_stack_set_visible_child(GTK_STACK(g_shell->wifi_icon_stack),
+                                connecting ? g_shell->wifi_spinner : g_shell->wifi_icon);
+    if (connecting) gtk_spinner_start(GTK_SPINNER(g_shell->wifi_spinner));
+    else            gtk_spinner_stop(GTK_SPINNER(g_shell->wifi_spinner));
+
+    if (!connecting) {
+        const gchar *icon = (st->state == WIFI_CONNECTED)
+                            ? wifi_icon_for_signal(st->signal)
+                            : "network-wireless-offline-symbolic";
+        gtk_image_set_from_icon_name(GTK_IMAGE(g_shell->wifi_icon), icon, GTK_ICON_SIZE_DND);
+        gtk_image_set_pixel_size(GTK_IMAGE(g_shell->wifi_icon), TILE_ICON_PIXELS);
+
+        if (g_shell->shelf_wifi_icon) {
+            gtk_image_set_from_icon_name(GTK_IMAGE(g_shell->shelf_wifi_icon), icon, GTK_ICON_SIZE_MENU);
+            gtk_image_set_pixel_size(GTK_IMAGE(g_shell->shelf_wifi_icon), 15);
+        }
+    } else if (g_shell->shelf_wifi_icon) {
+        gtk_image_set_from_icon_name(GTK_IMAGE(g_shell->shelf_wifi_icon),
+            "network-wireless-acquiring-symbolic", GTK_ICON_SIZE_MENU);
+        gtk_image_set_pixel_size(GTK_IMAGE(g_shell->shelf_wifi_icon), 15);
+    }
+
+    const gchar *label = (st->state == WIFI_CONNECTED && st->ssid) ? st->ssid
+                       : (connecting ? "Connecting…" : "Wi‑Fi");
+    gtk_label_set_text(GTK_LABEL(g_shell->wifi_label), label);
+    gtk_widget_set_tooltip_text(g_shell->wifi_tile, label);
+    if (g_shell->shelf_wifi_icon) gtk_widget_set_tooltip_text(g_shell->shelf_wifi_icon, label);
+
+    GtkStyleContext *ctx = gtk_widget_get_style_context(g_shell->wifi_tile);
+    if (g_shell->wifi_enabled) gtk_style_context_add_class(ctx, "active");
+    else gtk_style_context_remove_class(ctx, "active");
+}
+
+static void wifi_schedule_poll(void);
+
+static void
+wifi_async_callback(const gchar *output, gpointer user_data)
+{
+    (void)user_data;
+    g_shell->wifi_poll_pending = FALSE;
+    WifiStatus st;
+    wifi_status_from_output(output, &st);
+    apply_wifi_status(&st);
+    g_free(st.ssid);
+    wifi_schedule_poll();
+}
+
+static gboolean
+wifi_poll_tick(gpointer user_data)
+{
+    (void)user_data;
+    if (g_shell->wifi_poll_pending) return G_SOURCE_CONTINUE;
+    g_shell->wifi_poll_pending = TRUE;
+    run_command_async(
+        "nmcli radio wifi 2>/dev/null; echo '@'; "
+        "nmcli -t -f TYPE,STATE,CONNECTION device status 2>/dev/null; echo '@'; "
+        "nmcli -t -f IN-USE,SIGNAL device wifi 2>/dev/null",
+        wifi_async_callback, NULL);
+    g_shell->wifi_poll_timer = 0;
+    return G_SOURCE_REMOVE;
+}
+
+static void
+wifi_schedule_poll(void)
+{
+    guint interval = (g_shell->wifi_state == WIFI_CONNECTING)
+                     ? WIFI_POLL_CONNECTING_MS : WIFI_POLL_IDLE_MS;
+    if (g_shell->wifi_poll_timer)
+        g_source_remove(g_shell->wifi_poll_timer);
+    g_shell->wifi_poll_timer = g_timeout_add(interval, wifi_poll_tick, NULL);
+}
+
+static void
+wifi_poll_boost(void)
+{
+    if (g_shell->wifi_poll_pending) return;
+    if (g_shell->wifi_poll_timer) g_source_remove(g_shell->wifi_poll_timer);
+    g_shell->wifi_poll_timer = 0;
+    wifi_poll_tick(NULL);
+}
+
+static void
+start_wifi_polling(void)
+{
+    if (g_shell->wifi_poll_timer) return;
+    wifi_poll_tick(NULL);
+}
+
 static void
 toggle_wifi(GtkWidget *tile, gpointer user_data)
 {
     (void)user_data;
     gboolean active = gtk_style_context_has_class(gtk_widget_get_style_context(tile), "active");
     g_spawn_command_line_async(active ? "nmcli radio wifi off" : "nmcli radio wifi on", NULL);
+    wifi_poll_boost();
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+ * BLUETOOTH ASYNC
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+static void
+bt_async_callback(const gchar *output, gpointer user_data)
+{
+    (void)user_data;
+    g_shell->bt_poll_pending = FALSE;
+    gboolean bt_enabled = FALSE;
+    if (output) {
+        bt_enabled = (g_strcmp0(output, "yes") == 0);
+    }
+    g_shell->bt_enabled = bt_enabled;
+    GtkStyleContext *bt_ctx = gtk_widget_get_style_context(g_shell->bt_tile);
+    if (bt_enabled) gtk_style_context_add_class(bt_ctx, "active");
+    else gtk_style_context_remove_class(bt_ctx, "active");
+    gboolean airplane = !g_shell->wifi_enabled && !g_shell->bt_enabled;
+    GtkStyleContext *ap_ctx = gtk_widget_get_style_context(g_shell->airplane_tile);
+    if (airplane) gtk_style_context_add_class(ap_ctx, "active");
+    else gtk_style_context_remove_class(ap_ctx, "active");
+}
+
+static void
+update_tile_states_async(void)
+{
+    if (!g_shell->wifi_tile || !g_shell->bt_tile || !g_shell->airplane_tile) return;
+    if (g_shell->bt_poll_pending) return;
+    g_shell->bt_poll_pending = TRUE;
+    run_command_async("bluetoothctl show | grep -oP 'Powered: \\K\\w+'", bt_async_callback, NULL);
 }
 
 static void
@@ -971,10 +1793,17 @@ toggle_airplane_mode(GtkWidget *tile, gpointer user_data)
     (void)user_data;
     gboolean active = gtk_style_context_has_class(gtk_widget_get_style_context(tile), "active");
     g_spawn_command_line_async(active ? "nmcli radio all on" : "nmcli radio all off", NULL);
+    wifi_poll_boost();
 }
 
+/* ═══════════════════════════════════════════════════════════════════════
+ * SLIDER ROWS
+ * ═══════════════════════════════════════════════════════════════════════ */
+
 static GtkWidget *
-make_settings_tile(const char *icon_name, const char *label_text, GCallback click_callback)
+make_settings_tile(const char *icon_name, const char *label_text, GCallback click_callback,
+                   GtkWidget **out_icon, GtkWidget **out_label,
+                   GtkWidget **out_spinner, GtkWidget **out_icon_stack)
 {
     GtkWidget *tile = gtk_button_new();
     gtk_widget_set_size_request(tile, 100, 100);
@@ -982,66 +1811,84 @@ make_settings_tile(const char *icon_name, const char *label_text, GCallback clic
     
     GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
     gtk_widget_set_valign(box, GTK_ALIGN_CENTER);
+
     GtkWidget *icon = gtk_image_new_from_icon_name(icon_name, GTK_ICON_SIZE_DND);
-    gtk_image_set_pixel_size(GTK_IMAGE(icon), 28);
+    gtk_image_set_pixel_size(GTK_IMAGE(icon), TILE_ICON_PIXELS);
     gtk_widget_set_halign(icon, GTK_ALIGN_CENTER);
+
+    GtkWidget *icon_slot = icon;
+    GtkWidget *spinner = NULL;
+    if (out_spinner) {
+        spinner = gtk_spinner_new();
+        gtk_widget_set_size_request(spinner, TILE_ICON_PIXELS, TILE_ICON_PIXELS);
+
+        GtkWidget *stack = gtk_stack_new();
+        gtk_stack_set_transition_type(GTK_STACK(stack), GTK_STACK_TRANSITION_TYPE_CROSSFADE);
+        gtk_widget_set_halign(stack, GTK_ALIGN_CENTER);
+        gtk_stack_add_named(GTK_STACK(stack), icon, "icon");
+        gtk_stack_add_named(GTK_STACK(stack), spinner, "spinner");
+        icon_slot = stack;
+        if (out_icon_stack) *out_icon_stack = stack;
+    }
+
     GtkWidget *label = gtk_label_new(label_text);
     gtk_widget_set_halign(label, GTK_ALIGN_CENTER);
-    gtk_box_pack_start(GTK_BOX(box), icon, FALSE, FALSE, 0);
+    gtk_label_set_ellipsize(GTK_LABEL(label), PANGO_ELLIPSIZE_END);
+    gtk_label_set_max_width_chars(GTK_LABEL(label), 11);
+
+    gtk_box_pack_start(GTK_BOX(box), icon_slot, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(box), label, FALSE, FALSE, 0);
     gtk_container_add(GTK_CONTAINER(tile), box);
     g_signal_connect(tile, "clicked", click_callback, NULL);
+
+    if (out_icon)    *out_icon = icon;
+    if (out_label)   *out_label = label;
+    if (out_spinner) *out_spinner = spinner;
     return tile;
 }
 
-static void
-update_tile_states(void)
+static GtkWidget *
+make_slider_row(const char *icon_name, GtkWidget **out_icon, GtkWidget **out_slider,
+                GCallback changed_cb, int initial_value)
 {
-    if (!g_shell->wifi_tile || !g_shell->bt_tile || !g_shell->airplane_tile) return;
-    
-    gchar *wifi_output = run_command("nmcli radio wifi");
-    g_shell->wifi_enabled = (wifi_output != NULL && strstr(wifi_output, "enabled") != NULL);
-    g_free(wifi_output);
-    
-    gchar *bt_output = run_command("bluetoothctl show | grep -oP 'Powered: \\K\\w+'");
-    g_shell->bt_enabled = (bt_output != NULL && g_strcmp0(bt_output, "yes") == 0);
-    g_free(bt_output);
-    
-    GtkStyleContext *wifi_ctx = gtk_widget_get_style_context(g_shell->wifi_tile);
-    if (g_shell->wifi_enabled) gtk_style_context_add_class(wifi_ctx, "active");
-    else gtk_style_context_remove_class(wifi_ctx, "active");
-    
-    GtkStyleContext *bt_ctx = gtk_widget_get_style_context(g_shell->bt_tile);
-    if (g_shell->bt_enabled) gtk_style_context_add_class(bt_ctx, "active");
-    else gtk_style_context_remove_class(bt_ctx, "active");
-    
-    gboolean airplane = !g_shell->wifi_enabled && !g_shell->bt_enabled;
-    GtkStyleContext *ap_ctx = gtk_widget_get_style_context(g_shell->airplane_tile);
-    if (airplane) gtk_style_context_add_class(ap_ctx, "active");
-    else gtk_style_context_remove_class(ap_ctx, "active");
+    GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, PANEL_ROW_SPACING);
+    gtk_widget_set_margin_start(row, PANEL_ROW_MARGIN_SIDE);
+    gtk_widget_set_margin_end(row, PANEL_ROW_MARGIN_SIDE);
+    gtk_widget_set_margin_top(row, PANEL_ROW_MARGIN_TB);
+    gtk_widget_set_margin_bottom(row, PANEL_ROW_MARGIN_TB);
+
+    GtkWidget *icon = gtk_image_new_from_icon_name(icon_name, GTK_ICON_SIZE_DND);
+    gtk_image_set_pixel_size(GTK_IMAGE(icon), PANEL_ICON_PIXELS);
+    gtk_widget_set_size_request(icon, PANEL_ICON_PIXELS, PANEL_ICON_PIXELS);
+    gtk_widget_set_halign(icon, GTK_ALIGN_CENTER);
+    gtk_widget_set_valign(icon, GTK_ALIGN_CENTER);
+
+    GtkWidget *slider = gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL, 0, 100, 1);
+    gtk_scale_set_draw_value(GTK_SCALE(slider), FALSE);
+    gtk_widget_set_hexpand(slider, TRUE);
+    gtk_widget_set_valign(slider, GTK_ALIGN_CENTER);
+    g_signal_connect(slider, "value-changed", changed_cb, NULL);
+    g_signal_handlers_block_by_func(slider, changed_cb, NULL);
+    gtk_range_set_value(GTK_RANGE(slider), initial_value);
+    g_signal_handlers_unblock_by_func(slider, changed_cb, NULL);
+
+    gtk_box_pack_start(GTK_BOX(row), icon, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(row), slider, TRUE, TRUE, 0);
+
+    *out_icon = icon;
+    *out_slider = slider;
+    return row;
 }
 
-static void
-update_volume_icon_display(void)
-{
-    if (!g_shell->volume_icon) return;
-    gboolean muted = get_mute_state();
-    int volume = get_volume_percent();
-    const char *icon_name;
-    if (muted) icon_name = "audio-volume-muted-symbolic";
-    else if (volume > 70) icon_name = "audio-volume-high-symbolic";
-    else if (volume > 30) icon_name = "audio-volume-medium-symbolic";
-    else icon_name = "audio-volume-low-symbolic";
-    
-    gtk_image_set_from_icon_name(GTK_IMAGE(g_shell->volume_icon), icon_name, GTK_ICON_SIZE_DND);
-    gtk_image_set_pixel_size(GTK_IMAGE(g_shell->volume_icon), 22);
-}
+/* ═══════════════════════════════════════════════════════════════════════
+ * PANEL PERIODIC REFRESH
+ * ═══════════════════════════════════════════════════════════════════════ */
 
 static gboolean
 panel_periodic_refresh(gpointer user_data)
 {
     (void)user_data;
-    update_tile_states();
+    update_tile_states_async();
     
     if (g_shell->username_label) {
         struct utsname uts;
@@ -1051,25 +1898,16 @@ panel_periodic_refresh(gpointer user_data)
         g_free(hostname);
     }
     
-    if (g_shell->brightness_slider) {
-        g_signal_handlers_block_by_func(g_shell->brightness_slider,
-            G_CALLBACK(on_brightness_slider_changed), NULL);
-        gtk_range_set_value(GTK_RANGE(g_shell->brightness_slider), get_brightness_percent());
-        g_signal_handlers_unblock_by_func(g_shell->brightness_slider,
-            G_CALLBACK(on_brightness_slider_changed), NULL);
-    }
+    refresh_brightness_slider();
     
-    if (g_shell->volume_slider) {
-        g_signal_handlers_block_by_func(g_shell->volume_slider,
-            G_CALLBACK(on_volume_slider_changed), NULL);
-        gtk_range_set_value(GTK_RANGE(g_shell->volume_slider), get_volume_percent());
-        g_signal_handlers_unblock_by_func(g_shell->volume_slider,
-            G_CALLBACK(on_volume_slider_changed), NULL);
-    }
-    
-    update_volume_icon_display();
+    if (!audio_has_volume()) refresh_volume_ui();
+
     return G_SOURCE_CONTINUE;
 }
+
+/* ═══════════════════════════════════════════════════════════════════════
+ * QUICK SETTINGS PANEL CREATION
+ * ═══════════════════════════════════════════════════════════════════════ */
 
 static GtkWidget *
 create_quick_settings_panel(void)
@@ -1097,11 +1935,26 @@ create_quick_settings_panel(void)
     gtk_widget_set_halign(g_shell->username_label, GTK_ALIGN_START);
     
     GtkWidget *battery_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+    g_shell->battery_box = battery_box;
+    /*
+     * no_show_all is set on battery_box alone, not its children, and that
+     * is deliberate: gtk_widget_show_all() stops recursing the instant it
+     * hits a no_show_all widget, so anything packed inside would never be
+     * shown by the show_all() call below. The icon/label are shown here,
+     * once, unconditionally — they are static children that should always
+     * be visible whenever the box itself is visible. From this point on,
+     * battery_box's own visibility (set explicitly in refresh_battery_ui,
+     * which bypasses no_show_all) is the single switch that controls
+     * whether the indicator appears at all.
+     */
+    gtk_widget_set_no_show_all(battery_box, TRUE);
     g_shell->battery_icon = gtk_image_new_from_icon_name("battery-full-symbolic", GTK_ICON_SIZE_MENU);
     gtk_image_set_pixel_size(GTK_IMAGE(g_shell->battery_icon), 18);
     g_shell->battery_label = gtk_label_new("100%");
     gtk_box_pack_start(GTK_BOX(battery_box), g_shell->battery_icon, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(battery_box), g_shell->battery_label, FALSE, FALSE, 0);
+    gtk_widget_show(g_shell->battery_icon);
+    gtk_widget_show(g_shell->battery_label);
     
     gtk_box_pack_start(GTK_BOX(status_bar), g_shell->username_label, TRUE, TRUE, 0);
     gtk_box_pack_start(GTK_BOX(status_bar), battery_box, FALSE, FALSE, 0);
@@ -1115,50 +1968,29 @@ create_quick_settings_panel(void)
     gtk_widget_set_margin_top(tile_grid, 8);
     gtk_widget_set_margin_bottom(tile_grid, 8);
     
-    g_shell->wifi_tile = make_settings_tile("network-wireless-signal-excellent-symbolic", "Wi‑Fi", G_CALLBACK(toggle_wifi));
-    g_shell->bt_tile = make_settings_tile("bluetooth-active-symbolic", "Bluetooth", G_CALLBACK(toggle_bluetooth));
-    g_shell->airplane_tile = make_settings_tile("airplane-mode-symbolic", "Airplane", G_CALLBACK(toggle_airplane_mode));
+    g_shell->wifi_tile = make_settings_tile(
+        "network-wireless-offline-symbolic", "Wi‑Fi", G_CALLBACK(toggle_wifi),
+        &g_shell->wifi_icon, &g_shell->wifi_label,
+        &g_shell->wifi_spinner, &g_shell->wifi_icon_stack);
+    g_shell->bt_tile = make_settings_tile(
+        "bluetooth-active-symbolic", "Bluetooth", G_CALLBACK(toggle_bluetooth),
+        NULL, NULL, NULL, NULL);
+    g_shell->airplane_tile = make_settings_tile(
+        "airplane-mode-symbolic", "Airplane", G_CALLBACK(toggle_airplane_mode),
+        NULL, NULL, NULL, NULL);
     gtk_grid_attach(GTK_GRID(tile_grid), g_shell->wifi_tile, 0, 0, 1, 1);
     gtk_grid_attach(GTK_GRID(tile_grid), g_shell->bt_tile, 1, 0, 1, 1);
     gtk_grid_attach(GTK_GRID(tile_grid), g_shell->airplane_tile, 2, 0, 1, 1);
     gtk_box_pack_start(GTK_BOX(card), tile_grid, FALSE, FALSE, 0);
     
-    GtkWidget *brightness_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
-    gtk_widget_set_margin_start(brightness_row, 24);
-    gtk_widget_set_margin_end(brightness_row, 24);
-    gtk_widget_set_margin_top(brightness_row, 8);
-    gtk_widget_set_margin_bottom(brightness_row, 4);
-    gtk_box_pack_start(GTK_BOX(brightness_row),
-        gtk_image_new_from_icon_name("display-brightness-symbolic", GTK_ICON_SIZE_DND),
-        FALSE, FALSE, 0);
-    g_shell->brightness_slider = gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL, 0, 100, 1);
-    gtk_scale_set_draw_value(GTK_SCALE(g_shell->brightness_slider), FALSE);
-    gtk_widget_set_hexpand(g_shell->brightness_slider, TRUE);
-    g_signal_connect(g_shell->brightness_slider, "value-changed",
-        G_CALLBACK(on_brightness_slider_changed), NULL);
-    g_signal_handlers_block_by_func(g_shell->brightness_slider, G_CALLBACK(on_brightness_slider_changed), NULL);
-    gtk_range_set_value(GTK_RANGE(g_shell->brightness_slider), get_brightness_percent());
-    g_signal_handlers_unblock_by_func(g_shell->brightness_slider, G_CALLBACK(on_brightness_slider_changed), NULL);
-    gtk_box_pack_start(GTK_BOX(brightness_row), g_shell->brightness_slider, TRUE, TRUE, 0);
+    GtkWidget *brightness_row = make_slider_row("display-brightness-symbolic",
+        &g_shell->brightness_icon, &g_shell->brightness_slider,
+        G_CALLBACK(on_brightness_slider_changed), 50);
     gtk_box_pack_start(GTK_BOX(card), brightness_row, FALSE, FALSE, 0);
-    
-    GtkWidget *volume_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
-    gtk_widget_set_margin_start(volume_row, 24);
-    gtk_widget_set_margin_end(volume_row, 24);
-    gtk_widget_set_margin_top(volume_row, 4);
-    gtk_widget_set_margin_bottom(volume_row, 8);
-    g_shell->volume_icon = gtk_image_new_from_icon_name("audio-volume-high-symbolic", GTK_ICON_SIZE_DND);
-    gtk_image_set_pixel_size(GTK_IMAGE(g_shell->volume_icon), 22);
-    gtk_box_pack_start(GTK_BOX(volume_row), g_shell->volume_icon, FALSE, FALSE, 0);
-    g_shell->volume_slider = gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL, 0, 100, 1);
-    gtk_scale_set_draw_value(GTK_SCALE(g_shell->volume_slider), FALSE);
-    gtk_widget_set_hexpand(g_shell->volume_slider, TRUE);
-    g_signal_connect(g_shell->volume_slider, "value-changed",
-        G_CALLBACK(on_volume_slider_changed), NULL);
-    g_signal_handlers_block_by_func(g_shell->volume_slider, G_CALLBACK(on_volume_slider_changed), NULL);
-    gtk_range_set_value(GTK_RANGE(g_shell->volume_slider), get_volume_percent());
-    g_signal_handlers_unblock_by_func(g_shell->volume_slider, G_CALLBACK(on_volume_slider_changed), NULL);
-    gtk_box_pack_start(GTK_BOX(volume_row), g_shell->volume_slider, TRUE, TRUE, 0);
+
+    GtkWidget *volume_row = make_slider_row("audio-volume-high-symbolic",
+        &g_shell->volume_icon, &g_shell->volume_slider,
+        G_CALLBACK(on_volume_slider_changed), 50);
     gtk_box_pack_start(GTK_BOX(card), volume_row, FALSE, FALSE, 0);
     
     GtkWidget *bottom_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
@@ -1168,14 +2000,6 @@ create_quick_settings_panel(void)
     gtk_widget_set_margin_bottom(bottom_row, 12);
     GtkWidget *settings_btn = gtk_button_new_with_label("Settings");
     gtk_style_context_add_class(gtk_widget_get_style_context(settings_btn), "action-btn");
-    /*
-     * Must match the binary installed by the NuMate-Settings repo
-     * (https://github.com/TTR-IND/NuMate-Settings), which installs as
-     * `numate-settings`. This is a cross-repo contract: renaming the
-     * settings binary without changing this string leaves the button
-     * silently dead, because launch_cmd_cb has no failure path a user
-     * would ever see.
-     */
     g_signal_connect(settings_btn, "clicked", G_CALLBACK(launch_cmd_cb), "numate-settings");
     GtkWidget *power_btn = gtk_button_new_with_label("Power");
     gtk_style_context_add_class(gtk_widget_get_style_context(power_btn), "power-btn");
@@ -1186,10 +2010,11 @@ create_quick_settings_panel(void)
     gtk_box_pack_start(GTK_BOX(card), bottom_row, FALSE, FALSE, 0);
     
     gtk_widget_show_all(card);
-    update_tile_states();
-    update_volume_icon_display();
+    start_wifi_polling();
+    update_tile_states_async();
+    refresh_volume_ui();
+    refresh_battery_ui();
     
-    /* Seed the hostname now, then refresh periodically */
     if (g_shell->username_label) {
         struct utsname uts;
         uname(&uts);
@@ -1218,7 +2043,6 @@ toggle_panel(GtkWidget *button, gpointer user_data)
     GdkRectangle geometry;
     gdk_monitor_get_geometry(monitor, &geometry);
     
-    /* Position panel first (off‑screen, measure, then move) */
     gtk_window_move(GTK_WINDOW(g_shell->panel_window), -10000, -10000);
     gtk_widget_show_all(g_shell->panel_window);
     while (gtk_events_pending()) gtk_main_iteration();
@@ -1230,7 +2054,6 @@ toggle_panel(GtkWidget *button, gpointer user_data)
     int panel_y = geometry.y + geometry.height - SHELF_H - MENU_GAP - panel_height;
     gtk_window_move(GTK_WINDOW(g_shell->panel_window), panel_x, panel_y);
     
-    /* Notification centre: same width, directly above the panel */
     rebuild_notification_ui();
     gtk_widget_set_size_request(g_shell->notif_window, panel_width, -1);
     gtk_window_move(GTK_WINDOW(g_shell->notif_window), -10000, -10000);
@@ -1336,6 +2159,18 @@ discover_applications(void)
     return apps;
 }
 
+static gboolean
+on_app_list_row_press(GtkWidget *event_box, GdkEventButton *event, gpointer user_data)
+{
+    AppInfo *app = user_data;
+    if (event->button != 3 || !app || !app->dai) return FALSE;
+    /* Same context menu the dock uses (pin/unpin, open, windows) — the
+     * app menu has no window list for this widget, so that section of
+     * the menu is simply absent here, not reimplemented. */
+    show_context_menu(event_box, G_APP_INFO(app->dai), event);
+    return TRUE;
+}
+
 static GtkWidget *
 create_app_list_row(AppInfo *app)
 {
@@ -1357,6 +2192,8 @@ create_app_list_row(AppInfo *app)
     gtk_box_pack_start(GTK_BOX(hbox), label, TRUE, TRUE, 0);
     gtk_container_add(GTK_CONTAINER(event_box), hbox);
     g_object_set_data(G_OBJECT(row), "app-info", app);
+    g_signal_connect(event_box, "button-press-event",
+                      G_CALLBACK(on_app_list_row_press), app);
     return row;
 }
 
@@ -1440,11 +2277,21 @@ menu_show(MenuData *menu)
     gtk_window_move(GTK_WINDOW(menu->window), x, y);
     gtk_window_present(GTK_WINDOW(menu->window));
     gtk_widget_grab_focus(menu->search_entry);
+
+    /* GTK focus alone does not route X11 key events to an override-redirect
+     * window; take the seat's keyboard explicitly. Same idiom on_dock_press
+     * already uses for pointer grabs during drag. */
+    GdkSeat *seat = gdk_display_get_default_seat(gdk_display_get_default());
+    gdk_seat_grab(seat, gtk_widget_get_window(menu->window),
+                  GDK_SEAT_CAPABILITY_KEYBOARD, TRUE,
+                  NULL, NULL, NULL, NULL);
 }
 
 static void
 menu_hide(MenuData *menu)
 {
+    GdkSeat *seat = gdk_display_get_default_seat(gdk_display_get_default());
+    gdk_seat_ungrab(seat);
     gtk_widget_hide(menu->window);
     gtk_entry_set_text(GTK_ENTRY(menu->search_entry), "");
 }
@@ -1466,6 +2313,17 @@ menu_create(void)
     gtk_window_set_skip_taskbar_hint(GTK_WINDOW(menu->window), TRUE);
     gtk_window_set_skip_pager_hint(GTK_WINDOW(menu->window), TRUE);
     gtk_window_set_keep_above(GTK_WINDOW(menu->window), TRUE);
+    /*
+     * GTK_WINDOW_POPUP is override-redirect: the WM (Marco) never assigns
+     * it input focus by policy, regardless of gtk_widget_grab_focus(),
+     * which only sets GTK's internal focus widget and does nothing at the
+     * X11 level. Without DIALOG type-hint + an explicit keyboard grab on
+     * show, the search entry never receives key events and "search-changed"
+     * never fires. The instance popup and drag ghost stay GTK_WINDOW_POPUP
+     * correctly — neither takes text input — so this is scoped to the menu.
+     */
+    gtk_window_set_type_hint(GTK_WINDOW(menu->window), GDK_WINDOW_TYPE_HINT_DIALOG);
+    gtk_window_set_accept_focus(GTK_WINDOW(menu->window), TRUE);
     
     GtkWidget *outer_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_widget_set_name(outer_box, "GonzoMenu");
@@ -1773,19 +2631,28 @@ create_dock_item(GAppInfo *app, int icon_size, int widget_width, int widget_heig
     g_object_set_data(G_OBJECT(event_box), "img-ref", icon_widget);
     g_signal_connect(icon_widget, "destroy", G_CALLBACK(on_image_destroy_cleanup), NULL);
     
-    /*
-     * Belt-and-suspenders: if the dock icon is destroyed for any reason
-     * (window closed, unpinned app, dock refresh), cancel any instance
-     * popup that might still be polling its now-dangling widget pointer.
-     */
     g_signal_connect_swapped(event_box, "destroy", G_CALLBACK(cancel_instance_popup), NULL);
+    g_signal_connect(event_box, "destroy", G_CALLBACK(on_dock_item_destroy), NULL);
     
     return event_box;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════
- * DOCK — instance popup (multiple windows of the same app)
+ * DOCK — instance popup
  * ═══════════════════════════════════════════════════════════════════════ */
+
+static void
+on_dock_item_destroy(GtkWidget *widget, gpointer user_data)
+{
+    (void)user_data;
+    g_list_free(g_object_get_data(G_OBJECT(widget), "win_list"));
+    g_object_set_data(G_OBJECT(widget), "win_list", NULL);
+
+    if (g_shell->drag_widget == widget) {
+        g_shell->drag_widget = NULL;
+        g_shell->drag_active = FALSE;
+    }
+}
 
 static void
 cancel_instance_popup(void)
@@ -1947,31 +2814,27 @@ on_context_menu_instance_clicked(GtkWidget *item, gpointer user_data)
     }
 }
 
+static gpointer
+copy_object_ref(gconstpointer src, gpointer user_data)
+{
+    (void)user_data;
+    return g_object_ref(G_OBJECT((gpointer)src));
+}
+
 static void
 close_app_action_widget(GtkWidget *widget)
 {
     if (!widget) return;
-    GList *windows = g_object_get_data(G_OBJECT(widget), "win_list");
-    for (GList *l = windows; l; l = l->next)
-        wnck_window_close(WNCK_WINDOW(l->data), gtk_get_current_event_time());
-}
 
-static void
-close_app_action(gpointer user_data)
-{
-    GAppInfo *app = G_APP_INFO(user_data);
-    const char *desktop_id = g_app_info_get_id(app);
-    GList *children = gtk_container_get_children(GTK_CONTAINER(g_shell->dock_box));
-    for (GList *l = children; l; l = l->next) {
-        GtkWidget *child = GTK_WIDGET(l->data);
-        GAppInfo *child_app = G_APP_INFO(g_object_get_data(G_OBJECT(child), "app_info"));
-        if (child_app && g_strcmp0(g_app_info_get_id(child_app), desktop_id) == 0) {
-            close_app_action_widget(child);
-            break;
-        }
-    }
-    g_list_free(children);
-    g_object_unref(app);
+    GList *snapshot = g_list_copy_deep(g_object_get_data(G_OBJECT(widget), "win_list"),
+                                       copy_object_ref, NULL);
+    guint32 timestamp = gtk_get_current_event_time();
+
+    for (GList *l = snapshot; l; l = l->next)
+        if (WNCK_IS_WINDOW(l->data))
+            wnck_window_close(WNCK_WINDOW(l->data), timestamp);
+
+    g_list_free_full(snapshot, g_object_unref);
 }
 
 static void
@@ -2407,16 +3270,8 @@ on_window_closed(WnckScreen *screen, WnckWindow *window, gpointer user_data)
             }
         }
         if (!is_pinned) {
-            /*
-             * Cancel any instance popup that references this widget
-             * before destroying it.  The popup poll timer holds a
-             * pointer to current_dock_icon; if the icon is destroyed
-             * while the timer is running, the next poll tick would
-             * call is_pointer_over_widget on a dangling pointer.
-             */
             if (g_shell->current_dock_icon == target_widget)
                 cancel_instance_popup();
-
             identity_unregister_widget(target_widget);
             gtk_widget_destroy(target_widget);
         }
@@ -2558,6 +3413,14 @@ typedef struct {
     gchar *object_path;
 } PendingSNIRegistration;
 
+/* Type-safe GdkPixbufDestroyNotify wrapper to avoid cast warning */
+static void
+pixbuf_free_wrapper(guchar *pixels, gpointer data)
+{
+    (void)data;
+    g_free(pixels);
+}
+
 static GdkPixbuf *
 parse_icon_pixmap(GVariant *pixmap_array)
 {
@@ -2570,6 +3433,8 @@ parse_icon_pixmap(GVariant *pixmap_array)
     gint32 w, h;
     GVariant *bytes_v;
     while (g_variant_iter_loop(&iter, "(ii@ay)", &w, &h, &bytes_v)) {
+        if (w <= 0 || h <= 0 || w > TRAY_ICON_MAX_DIM || h > TRAY_ICON_MAX_DIM)
+            continue;
         if (w > best_width) {
             if (best_bytes) g_variant_unref(best_bytes);
             best_width = w;
@@ -2585,9 +3450,9 @@ parse_icon_pixmap(GVariant *pixmap_array)
     gsize raw_len = 0;
     const guint8 *raw = g_variant_get_fixed_array(best_bytes, &raw_len, sizeof(guint8));
     gsize expected_len = (gsize)best_width * (gsize)best_height * 4;
-    if (raw_len < expected_len) {
-        GONZO_LOG("tray: IconPixmap data too short (got %zu bytes, expected %zu for %dx%d) — skipping",
-                  raw_len, expected_len, best_width, best_height);
+    if ((gsize)best_width > G_MAXSIZE / 4 / (gsize)best_height || raw_len < expected_len) {
+        GONZO_LOG("tray: IconPixmap data invalid (width=%d height=%d, expected %zu bytes, got %zu) — skipping",
+                  best_width, best_height, expected_len, raw_len);
         g_variant_unref(best_bytes);
         return NULL;
     }
@@ -2607,7 +3472,7 @@ parse_icon_pixmap(GVariant *pixmap_array)
     
     GdkPixbuf *pixbuf = gdk_pixbuf_new_from_data(pixels, GDK_COLORSPACE_RGB, TRUE, 8,
                                                  best_width, best_height, best_width * 4,
-                                                 (GdkPixbufDestroyNotify)g_free, NULL);
+                                                 pixbuf_free_wrapper, NULL);
     return pixbuf;
 }
 
@@ -2671,15 +3536,17 @@ on_sni_properties_ready(GObject *source, GAsyncResult *result, gpointer user_dat
     g_variant_get(props_variant, "(@a{sv})", &props_dict);
     
     gchar *item_id = NULL, *title = NULL, *icon_name = NULL;
-    gboolean item_is_menu = FALSE;
     gchar *menu_path = NULL;
     
     GVariant *v;
-    if ((v = g_variant_lookup_value(props_dict, "Id", G_VARIANT_TYPE_STRING))) { item_id = g_variant_dup_string(v, NULL); g_variant_unref(v); }
-    if ((v = g_variant_lookup_value(props_dict, "Title", G_VARIANT_TYPE_STRING))) { title = g_variant_dup_string(v, NULL); g_variant_unref(v); }
-    if ((v = g_variant_lookup_value(props_dict, "IconName", G_VARIANT_TYPE_STRING))) { icon_name = g_variant_dup_string(v, NULL); g_variant_unref(v); }
-    if ((v = g_variant_lookup_value(props_dict, "ItemIsMenu", G_VARIANT_TYPE_BOOLEAN))) { item_is_menu = g_variant_get_boolean(v); g_variant_unref(v); }
-    if ((v = g_variant_lookup_value(props_dict, "Menu", G_VARIANT_TYPE_OBJECT_PATH))) { menu_path = g_variant_dup_string(v, NULL); g_variant_unref(v); }
+    if ((v = g_variant_lookup_value(props_dict, "Id", G_VARIANT_TYPE_STRING)))
+    { item_id = safe_truncate(g_variant_get_string(v, NULL), NOTIF_MAX_STRING_LENGTH); g_variant_unref(v); }
+    if ((v = g_variant_lookup_value(props_dict, "Title", G_VARIANT_TYPE_STRING)))
+    { title = safe_truncate(g_variant_get_string(v, NULL), NOTIF_MAX_STRING_LENGTH); g_variant_unref(v); }
+    if ((v = g_variant_lookup_value(props_dict, "IconName", G_VARIANT_TYPE_STRING)))
+    { icon_name = safe_truncate(g_variant_get_string(v, NULL), NOTIF_MAX_STRING_LENGTH); g_variant_unref(v); }
+    if ((v = g_variant_lookup_value(props_dict, "Menu", G_VARIANT_TYPE_OBJECT_PATH)))
+    { menu_path = g_variant_dup_string(v, NULL); g_variant_unref(v); }
     
     GdkPixbuf *icon_pixbuf = NULL;
     if (!icon_name || !*icon_name) {
@@ -2689,7 +3556,6 @@ on_sni_properties_ready(GObject *source, GAsyncResult *result, gpointer user_dat
         }
     }
     
-    /* Resolve a human-readable name from the app's executable */
     gchar *display_name = NULL;
     GDBusConnection *bus = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, NULL);
     if (bus) {
@@ -2718,11 +3584,11 @@ on_sni_properties_ready(GObject *source, GAsyncResult *result, gpointer user_dat
     const gchar *app_id = item_id ? item_id : pending->sender_bus_name;
     const gchar *display_icon = (icon_name && *icon_name) ? icon_name : "application-x-executable";
     
-    AppNotificationGroup *group = find_or_create_app_group(app_id, display_name, display_icon);
+    AppNotificationGroup *group = find_or_create_app_group(app_id, display_name, display_icon, NULL);
     group->has_tray_item = TRUE;
     g_free(group->app_name);
-    group->app_name = g_strdup(display_name);
-    if (icon_name && *icon_name) { g_free(group->app_icon); group->app_icon = g_strdup(icon_name); }
+    group->app_name = safe_truncate(display_name, NOTIF_MAX_STRING_LENGTH);
+    if (icon_name && *icon_name) { g_free(group->app_icon); group->app_icon = safe_truncate(icon_name, NOTIF_MAX_STRING_LENGTH); }
     if (group->icon_pixbuf) g_object_unref(group->icon_pixbuf);
     group->icon_pixbuf = icon_pixbuf;
     
@@ -2733,7 +3599,6 @@ on_sni_properties_ready(GObject *source, GAsyncResult *result, gpointer user_dat
     group->object_path = g_strdup(pending->object_path);
     group->menu_path = menu_path ? g_strdup(menu_path) : NULL;
     
-    /* Build the app's own dbusmenu eagerly so it's ready on first click */
     if (group->dbus_menu) { gtk_widget_destroy(group->dbus_menu); group->dbus_menu = NULL; }
     if (group->menu_path && pending->sender_bus_name) {
         DbusmenuGtkMenu *dm = dbusmenu_gtkmenu_new(pending->sender_bus_name, group->menu_path);
@@ -2855,10 +3720,6 @@ on_watcher_name_lost(GDBusConnection *connection, const gchar *name, gpointer us
 static void
 own_status_notifier_host_name(void)
 {
-    /*
-     * Qt5 apps expect a *Host* to be present at start‑up; owning this name
-     * satisfies that requirement without any actual server behind it.
-     */
     gchar *host_name = g_strdup_printf("org.kde.StatusNotifierHost-%d", (int)getpid());
     g_bus_own_name(G_BUS_TYPE_SESSION, host_name, G_BUS_NAME_OWNER_FLAGS_NONE,
                    NULL, NULL, NULL, NULL, NULL);
@@ -2886,12 +3747,72 @@ handle_notifications_method_call(GDBusConnection *connection, const gchar *sende
                      &app_name, &replaces_id, &app_icon, &summary, &body,
                      &actions_v, &hints_v, &expire_timeout);
         
+        if (strlen(app_name) > NOTIF_MAX_STRING_LENGTH ||
+            strlen(summary) > NOTIF_MAX_STRING_LENGTH ||
+            strlen(body) > NOTIF_MAX_STRING_LENGTH) {
+            g_dbus_method_invocation_return_error(invocation,
+                G_DBUS_ERROR, G_DBUS_ERROR_INVALID_ARGS,
+                "String length exceeds maximum allowed (%d)", NOTIF_MAX_STRING_LENGTH);
+            if (actions_v) g_variant_unref(actions_v);
+            if (hints_v) g_variant_unref(hints_v);
+            return;
+        }
+
+        gchar *desktop_hint = NULL;
+        if (hints_v) {
+            GVariant *de = g_variant_lookup_value(hints_v, "desktop-entry", G_VARIANT_TYPE_STRING);
+            if (de) {
+                desktop_hint = g_variant_dup_string(de, NULL);
+                g_variant_unref(de);
+            }
+        }
+
+        AppNotificationGroup *group = find_app_group(app_name);
+        if (replaces_id != 0) {
+            if (!group || !group->notifications) {
+                replaces_id = 0;
+            } else {
+                gboolean found = FALSE;
+                for (GList *n = group->notifications; n; n = n->next) {
+                    if (((Notification*)n->data)->id == replaces_id) {
+                        found = TRUE;
+                        break;
+                    }
+                }
+                if (!found) replaces_id = 0;
+            }
+        }
+
+        if (!group) {
+            gchar *display_name = NULL, *display_icon = NULL, *desktop_id = NULL;
+            resolve_notification_app_identity(app_name, desktop_hint, app_icon,
+                                              &display_name, &display_icon, &desktop_id);
+            group = find_or_create_app_group(app_name, display_name, display_icon, desktop_id);
+            g_free(display_name);
+            g_free(display_icon);
+            g_free(desktop_id);
+        }
+
         guint32 notif_id = (replaces_id != 0) ? replaces_id : g_shell->next_notification_id++;
-        const gchar *icon_name = (app_icon && *app_icon) ? app_icon : "application-x-executable";
-        AppNotificationGroup *group = find_or_create_app_group(app_name, app_name, icon_name);
-        Notification *notif = create_notification(notif_id, app_name, icon_name, summary, body, app_name);
+        Notification *notif = create_notification(notif_id, group->app_name, group->app_icon,
+                                                  summary, body, group->app_name);
+        if (replaces_id != 0) {
+            for (GList *l = group->notifications; l; l = l->next) {
+                Notification *old = l->data;
+                if (old->id == replaces_id) {
+                    group->notifications = g_list_remove(group->notifications, old);
+                    if (group->unread_count > 0) group->unread_count--;
+                    free_notification(old);
+                    break;
+                }
+            }
+        }
         add_notification_to_group(group, notif);
         rebuild_notification_ui();
+
+        g_free(desktop_hint);
+        if (actions_v) g_variant_unref(actions_v);
+        if (hints_v) g_variant_unref(hints_v);
         g_dbus_method_invocation_return_value(invocation, g_variant_new("(u)", notif_id));
         return;
     }
@@ -3054,6 +3975,9 @@ main(int argc, char **argv)
     
     apply_styles();
     load_config();
+    audio_init();
+    battery_init();
+    backlight_init();
     
     g_shell->handle = wnck_handle_new(WNCK_CLIENT_TYPE_PAGER);
     g_shell->screen = wnck_handle_get_default_screen(g_shell->handle);
@@ -3062,15 +3986,12 @@ main(int argc, char **argv)
     g_signal_connect(g_shell->screen, "window-closed", G_CALLBACK(on_window_closed), NULL);
     g_signal_connect(g_shell->screen, "active-window-changed", G_CALLBACK(on_active_window_changed), NULL);
     
-    /* Create notification centre (shown together with the panel) */
     g_shell->notif_window = create_notification_center();
     
-    /* Own real notification bus name */
     g_bus_own_name(G_BUS_TYPE_SESSION, "org.freedesktop.Notifications",
                    G_BUS_NAME_OWNER_FLAGS_NONE,
                    on_notifications_bus_acquired, NULL, on_notifications_name_lost, NULL, NULL);
     
-    /* Own status‑notifier watcher and register as host (required for Qt5 tray icons) */
     g_bus_own_name(G_BUS_TYPE_SESSION, "org.kde.StatusNotifierWatcher",
                    G_BUS_NAME_OWNER_FLAGS_NONE,
                    on_watcher_bus_acquired, NULL, on_watcher_name_lost, NULL, NULL);
@@ -3110,8 +4031,38 @@ main(int argc, char **argv)
     gtk_box_pack_start(GTK_BOX(g_shell->shelf_box), g_shell->dock_box, TRUE, FALSE, 0);
     
     g_shell->clock_label = gtk_label_new("00:00");
+
+    g_shell->shelf_wifi_icon = gtk_image_new_from_icon_name("network-wireless-offline-symbolic", GTK_ICON_SIZE_MENU);
+    gtk_image_set_pixel_size(GTK_IMAGE(g_shell->shelf_wifi_icon), 15);
+
+    /*
+     * Same no_show_all pattern as battery_box, but this widget is a leaf
+     * (no children), so there's no show_all()-recursion trap here — the
+     * icon itself is the thing whose visibility toggles.
+     */
+    g_shell->shelf_battery_icon = gtk_image_new_from_icon_name("battery-full-symbolic", GTK_ICON_SIZE_MENU);
+    gtk_image_set_pixel_size(GTK_IMAGE(g_shell->shelf_battery_icon), 15);
+    gtk_widget_set_no_show_all(g_shell->shelf_battery_icon, TRUE);
+
+    /*
+     * Uniform box spacing is optically wrong here: symbolic icons render
+     * into a padded canvas whose built-in margin varies per glyph (a
+     * battery outline fills its square more than a wifi arc does), while
+     * the clock label's bounding box hugs its actual ink with no padding
+     * of its own. The same spacing value next to two icons reads as much
+     * larger than that value next to an icon and text. Spacing is set to
+     * 0 and each gap is an explicit, individually-tuned margin instead of
+     * one shared number standing in for two different kinds of gap.
+     */
+    GtkWidget *status_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    gtk_widget_set_margin_end(g_shell->shelf_wifi_icon, 5);
+    gtk_widget_set_margin_end(g_shell->shelf_battery_icon, 9);
+    gtk_box_pack_start(GTK_BOX(status_row), g_shell->shelf_wifi_icon, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(status_row), g_shell->shelf_battery_icon, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(status_row), g_shell->clock_label, FALSE, FALSE, 0);
+
     GtkWidget *clock_button = gtk_button_new();
-    gtk_container_add(GTK_CONTAINER(clock_button), g_shell->clock_label);
+    gtk_container_add(GTK_CONTAINER(clock_button), status_row);
     gtk_style_context_add_class(gtk_widget_get_style_context(clock_button), "status-pill");
     
     g_shell->panel_window = create_quick_settings_panel();

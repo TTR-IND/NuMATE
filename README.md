@@ -14,35 +14,26 @@ No workflow reinvention. No bloat. No web-app desktop. No chasing whatever deskt
 
 Just a fast, clean desktop that gets out of your way.
 
-## GonzoShell
-
-GonzoShell is the NuMATE desktop interface: a brand new shell written from
-scratch in raw C, drawing on ideas from UKUI, ChromeOS and others. The goal was
-to keep the platform-wide codebase lightweight, fast and no-nonsense, while
-presenting something modern and full-featured that still stays minimalist —
-everything you'd expect from a basic shell, with some spit and polish.
-
-MATE Panel was great in 2002, but we've moved on. Nobody wants an ugly tray with
-inconsistent icons, or notifications that vanish if you aren't quick enough to
-catch them. I don't believe we should still be putting up with that in 2026. Why
-shouldn't we have something that feels as tightly programmed as early Mac OS X?
-That's the bar GonzoShell is aiming at, and it's why NuMATE registers it as the
-session's panel component rather than shipping mate-panel.
-
-It's honest about where it is: roughly 90% there. A few basic customisation
-features are coming shortly — MATE users will rightly expect them — but a brand
-new shell takes time to flesh out completely.
-
 ## Installation
 
-NuMATE installs on top of a Devuan system running XLibre. Clone the repo and run the installer
-as your normal user — **not** with `sudo`:
+NuMATE installs on top of a Devuan system.
+
+Clone the current pre-release tag and run the installer as your normal user —
+**not** with `sudo`:
 
 ```sh
-git clone https://github.com/TTR-IND/NuMATE.git
+git clone --branch 1.0-Preview --depth 1 https://github.com/TTR-IND/NuMATE.git
 cd NuMATE
 ./installer.sh
 ```
+
+`--branch 1.0-Preview` matters. Cloning without it gives you `main`, which is the
+development branch and is not what you want unless you are working on NuMATE
+itself. `--depth 1` skips the history, which is a smaller download.
+
+You can also download the release zip from the
+[**Releases**](https://github.com/TTR-IND/NuMATE/releases) page and unpack it —
+the result is the same tree.
 
 The installer calls `sudo` itself for the steps that need root. Running the whole
 thing as root breaks the final stage, which writes into your live session's dconf
@@ -56,20 +47,44 @@ relative to its own path, and a piped invocation has no own path. Clone first.
 | Flag | Effect |
 |---|---|
 | `--dry-run` | Print every stage, change nothing. Run this first. |
-| `--skip-waterfox` | Skip the Waterfox tarball stage |
 | `--skip-theme` | Skip fonts, themes and cursors |
 | `--skip-settings` | Skip fetching and building NuMate-Settings |
 | `--skip-shell` | Skip building the NuMATE shell |
 
+### Developer options
+
+For re-running part of a failed install. They assume the earlier stages already
+completed on this machine — **do not use them on a fresh system.**
+
+| Flag | Effect |
+|---|---|
+| `--list-stages` | List the eight stages and their numbers |
+| `--from-stage=5` | Start at stage 5 and run through to the end |
+| `--only-stage=3` | Run stage 3 and nothing else |
+
+Stage numbers are stable and printed in the `[n/8]` progress marker, so the
+number in a failure message is the number to resume from.
+
 ## What the installer does
 
-**WARNING!** - This installer WILL destroy any existing MATE installation. You have been warned. It is recommended to make backups or use a separate testing enrironment. 
+It is a **desktop environment installer and nothing else**. It does not touch the
+kernel, the display server, or the init system.
 
 1. **Standard MATE** — installs `mate-desktop-environment` in full.
 2. **Strip** — purges the components NuMATE replaces: `mate-control-center`,
    `mate-panel`, `mate-applets`, `caja`, `file-roller`.
 3. **Applications** — Nemo (file manager *and* desktop), Engrampa (archiver),
-   Pluma (text editor), Waterfox (browser, from the upstream tarball), GParted.
+   Pluma (text editor), Waterfox (browser), GParted.
+
+   Waterfox is installed from [BrowserWorks' signed apt
+   repository](https://download.opensuse.org/repositories/isv:/BrowserWorks/Debian_13/),
+   registered by the installer with its key pinned via `signed-by=` so it can
+   only validate that one source. It is a normal apt package and updates with
+   the rest of the system — no tarball, nothing in `/opt`.
+
+   **That repository currently ships a beta** (6.7.0~beta.3 as of August 2026).
+   If the repository cannot be reached, no browser is installed and the
+   installer says so — re-run stage 3 once it is available.
 4. **Defaults** — binds those applications to their MIME types, system-wide and
    for the invoking user.
 5. **Appearance** — Fluent-grey-Dark, Qogir cursors, Yaru icons, Lato Light and
@@ -79,10 +94,11 @@ relative to its own path, and a piped invocation has no own path. Clone first.
    network beyond apt and always gets the exact revision NuMATE was designed
    against. Both are GPL-3.0 and their licence files must stay in place — see
    [THIRD-PARTY-LICENCES.md](THIRD-PARTY-LICENCES.md).
-6. **NuMate-Settings** — cloned from
-   [its own repository](https://github.com/TTR-IND/NuMate-Settings) and built
-   with `make`. It is the only settings application; `mate-control-center` is
-   gone.
+6. **NuMate-Settings** — the newest published release is downloaded from
+   [its own repository](https://github.com/TTR-IND/NuMate-Settings/releases) and
+   built with `make`. It is the only settings application; `mate-control-center`
+   is gone. Only released versions are installed — if no release can be
+   downloaded the stage stops rather than falling back to development code.
 7. **Shell** — builds `bin/gonzo-shell.c` and registers it as the MATE session's
    **required `panel` component**, taking the slot `mate-panel` used to occupy.
    Not an autostart entry: mate-session brings the shell up as part of the
@@ -107,14 +123,12 @@ so the GUI disappears from every menu and the masking survives package upgrades.
 it is `/usr/bin/mate-network-properties`, shipped by `mate-control-center`, which
 *is* purged. Removing that package removes this binary.
 
-Please refer to: https://github.com/TTR-IND/NuMate-Settings for more information on how I'm planning to drop these dependencies. 
-
 ## Components
 
 | Piece | Source | Installed to |
 |---|---|---|
-| Gonzo-Shell | `bin/gonzo-shell.c` in this repo | `/usr/local/bin/gonzo-shell` |
-| NuMate-Settings | [its own repository](https://github.com/TTR-IND/NuMate-Settings) | `/usr/local/bin/numate-settings` |
+| NuMATE shell | `bin/gonzo-shell.c` in this repo | `/usr/local/bin/gonzo-shell` |
+| NuMate-Settings | [its newest release](https://github.com/TTR-IND/NuMate-Settings/releases) | `/usr/local/bin/numate-settings` |
 | Wallpaper helper | `bin/numate-set-wallpaper` | `/usr/local/bin/` |
 | Nemo actions | `nemo/*.nemo_action` | `/usr/share/nemo/actions/` |
 | Themes and cursors | `theme/` (vendored) | `/usr/share/themes/`, `/usr/share/icons/` |
@@ -175,7 +189,19 @@ Some concepts in NuMATE are inspired by (but not copied from) projects including
 
 **Here's what NuMATE does NOT tolerate:** spaghetti code, unnecessary complexity, and sloppy architecture.
 
-**Here's what NuMATE DOES tolerate:** contributors using AI tools to assist their work. I judge code, not where it came from.
+## Contributions
+
+NuMATE does not accept outside contributions — no pull requests, no feature requests, no roadmap input.
+
+This isn't a swipe at anyone who'd want to. It's that NuMATE is built to one person's judgement about what a desktop should be, and that only works if the judgement stays singular. A tiling mode, a different launcher paradigm, chat-app integration — these might be good ideas for a different desktop. They're not what this one is for.
+
+You're welcome to read the code, learn from it, and run it. If you want a desktop shaped differently, fork it and take it wherever you like — that's what the license is for.
+
+None of this means I've got my head in the sand. I keep an eye on social media and read the feedback that comes in. If something raised there lines up with where the rest of the industry is actually going, not just one person's preference, I'll consider it. The decision's still mine, but I'm not ignoring the room.
+
+## Moving off GitHub
+
+NuMATE is in the process of migrating off Git and GitHub to **Chunk**, an in-house version control and repository hosting system running on our own infrastructure. The repository and its history will remain browsable once the migration is complete; the links in this README will be updated to point there when it happens. Until then, the GitHub links below are current.
 
 
 ## About the Founder
@@ -234,7 +260,7 @@ The outdated implementation doesn't have to.
 
 ## Status
 
-NuMATE is currently under active development. I have been working on the project for nearly a year now and I'm actively working to improve it all the time. It is my daily driver. It IS in a working state, however it's only recently been packaged into a form that's installable by general users. Please be patient whilst I fix any issues and test on different distros. This costs time and money. 
+NuMATE is currently under active development. I have been working on the project for nearly a year now and hope to have a release ready soon. Thank you very much for your interest.
 
 The project is being built incrementally, with the desktop shell, settings, and supporting components being modernised and consolidated into a coherent desktop environment.
 
