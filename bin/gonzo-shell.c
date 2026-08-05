@@ -508,13 +508,6 @@ apply_styles(void)
         ".status-pill:hover { background: rgba(255,255,255,0.12); }\n"
         ".status-pill:active { background: rgba(255,255,255,0.2); }\n"
         "label { color: #e8eaed; }\n"
-        /*
-         * scale's border/frame comes from the base GTK theme's default
-         * widget styling, not from anything set here. Killing it
-         * explicitly (rather than fighting it with a matching override)
-         * is the one-line fix; the frame is gone regardless of which
-         * color drives the highlight.
-         */
         "scale { border: none; box-shadow: none; outline: none; background: none; }\n"
         "scale trough { border: none; box-shadow: none; outline: none; }\n"
         "scale highlight { background: " GONZO_ACCENT "; border: none; box-shadow: none; }\n"
@@ -581,13 +574,6 @@ apply_styles(void)
 
 /* ═══════════════════════════════════════════════════════════════════════
  * BRIGHTNESS (org.mate.PowerManager.Backlight, session bus)
- *
- * GetBrightness/SetBrightness on this interface are already expressed as
- * a 0-100 percentage — that is precisely why it replaces the helper: the
- * helper's two-step "read max, scale, clamp, spawn pkexec" dance existed
- * only to translate raw hardware units into a percentage by hand. A single
- * D-Bus method call on the session bus does the same job with no spawned
- * process, no polkit round-trip, and no cached maximum to keep in sync.
  * ═══════════════════════════════════════════════════════════════════════ */
 
 static void
@@ -1027,15 +1013,6 @@ battery_init(void)
     g_signal_connect(g_shell->upower_proxy, "g-properties-changed",
                      G_CALLBACK(on_upower_properties_changed), NULL);
 
-    /*
-     * battery_box does not exist yet at this call site (it's built later
-     * in create_quick_settings_panel, which does its own initial refresh).
-     * This call is here so battery_init() stays correct on its own terms:
-     * if the panel is ever built before the proxy, or the proxy is ever
-     * created asynchronously, the indicator still gets populated the
-     * moment the proxy becomes ready. refresh_battery_ui() no-ops safely
-     * when the widgets aren't built yet.
-     */
     refresh_battery_ui();
 }
 
@@ -1220,18 +1197,27 @@ on_clear_all_clicked(GtkWidget *button, gpointer user_data)
 }
 
 static void
-on_app_bar_clicked(GtkWidget *widget, gpointer user_data)
+app_bar_toggle_collapse(AppNotificationGroup *group)
 {
-    (void)widget;
-    AppNotificationGroup *group = user_data;
+    if (!group) {
+        g_warning("app_bar_toggle_collapse: NULL group, ignoring");
+        return;
+    }
     group->collapsed = !group->collapsed;
-    if (group->stack_widget)
+    if (group->stack_widget && GTK_IS_WIDGET(group->stack_widget))
         gtk_widget_set_visible(group->stack_widget, !group->collapsed);
-    if (group->arrow_icon) {
+    if (group->arrow_icon && GTK_IS_IMAGE(group->arrow_icon)) {
         gtk_image_set_from_icon_name(GTK_IMAGE(group->arrow_icon),
             group->collapsed ? "pan-down-symbolic" : "pan-up-symbolic",
             GTK_ICON_SIZE_MENU);
     }
+}
+
+static void
+on_app_bar_arrow_clicked(GtkWidget *widget, gpointer user_data)
+{
+    (void)widget;
+    app_bar_toggle_collapse((AppNotificationGroup *)user_data);
 }
 
 static void
@@ -1360,7 +1346,11 @@ create_app_card(AppNotificationGroup *group)
     
     GtkWidget *app_bar = gtk_event_box_new();
     gtk_widget_set_name(app_bar, "NotifAppBar");
-    g_signal_connect(app_bar, "button-press-event", G_CALLBACK(on_app_bar_clicked), group);
+    /* GONZO_REMOVED [title-click-collapse]: previously any click on this row
+     * (including on the app title/status text) toggled group->collapsed via
+     * on_app_bar_button_press. That was surprising, unrequested behavior with
+     * no discoverable affordance -- removed at the user's request. The arrow
+     * button below is the sole, deliberate expand/collapse control now. */
     
     GtkWidget *bar_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
     gtk_container_set_border_width(GTK_CONTAINER(bar_box), 12);
@@ -1386,15 +1376,21 @@ create_app_card(AppNotificationGroup *group)
     
     GtkWidget *info_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
     GtkWidget *name_label = gtk_label_new(group->app_name);
-    gtk_widget_set_halign(name_label, GTK_ALIGN_START);
+    gtk_label_set_xalign(GTK_LABEL(name_label), 0.0);
+    gtk_widget_set_hexpand(name_label, TRUE);
     gtk_widget_set_name(name_label, "NotifAppName");
+    gtk_label_set_ellipsize(GTK_LABEL(name_label), PANGO_ELLIPSIZE_END);
+    gtk_label_set_max_width_chars(GTK_LABEL(name_label), 1);
     
     group->status_label = gtk_label_new(
         group->unread_count > 0
         ? g_strdup_printf("%d new messages", group->unread_count)
         : (group->has_tray_item ? "Running in background..." : "No new messages"));
-    gtk_widget_set_halign(group->status_label, GTK_ALIGN_START);
+    gtk_label_set_xalign(GTK_LABEL(group->status_label), 0.0);
+    gtk_widget_set_hexpand(group->status_label, TRUE);
     gtk_widget_set_name(group->status_label, "NotifAppStatus");
+    gtk_label_set_ellipsize(GTK_LABEL(group->status_label), PANGO_ELLIPSIZE_END);
+    gtk_label_set_max_width_chars(GTK_LABEL(group->status_label), 1);
     
     gtk_box_pack_start(GTK_BOX(info_box), name_label, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(info_box), group->status_label, FALSE, FALSE, 0);
@@ -1417,7 +1413,7 @@ create_app_card(AppNotificationGroup *group)
     group->arrow_icon = gtk_image_new_from_icon_name("pan-up-symbolic", GTK_ICON_SIZE_MENU);
     gtk_image_set_pixel_size(GTK_IMAGE(group->arrow_icon), 16);
     gtk_container_add(GTK_CONTAINER(arrow_btn), group->arrow_icon);
-    g_signal_connect(arrow_btn, "clicked", G_CALLBACK(on_app_bar_clicked), group);
+    g_signal_connect(arrow_btn, "clicked", G_CALLBACK(on_app_bar_arrow_clicked), group);
     gtk_widget_set_no_show_all(arrow_btn, group->notifications == NULL);
     gtk_widget_set_visible(arrow_btn, group->notifications != NULL);
     
@@ -1936,17 +1932,6 @@ create_quick_settings_panel(void)
     
     GtkWidget *battery_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
     g_shell->battery_box = battery_box;
-    /*
-     * no_show_all is set on battery_box alone, not its children, and that
-     * is deliberate: gtk_widget_show_all() stops recursing the instant it
-     * hits a no_show_all widget, so anything packed inside would never be
-     * shown by the show_all() call below. The icon/label are shown here,
-     * once, unconditionally — they are static children that should always
-     * be visible whenever the box itself is visible. From this point on,
-     * battery_box's own visibility (set explicitly in refresh_battery_ui,
-     * which bypasses no_show_all) is the single switch that controls
-     * whether the indicator appears at all.
-     */
     gtk_widget_set_no_show_all(battery_box, TRUE);
     g_shell->battery_icon = gtk_image_new_from_icon_name("battery-full-symbolic", GTK_ICON_SIZE_MENU);
     gtk_image_set_pixel_size(GTK_IMAGE(g_shell->battery_icon), 18);
@@ -2164,9 +2149,6 @@ on_app_list_row_press(GtkWidget *event_box, GdkEventButton *event, gpointer user
 {
     AppInfo *app = user_data;
     if (event->button != 3 || !app || !app->dai) return FALSE;
-    /* Same context menu the dock uses (pin/unpin, open, windows) — the
-     * app menu has no window list for this widget, so that section of
-     * the menu is simply absent here, not reimplemented. */
     show_context_menu(event_box, G_APP_INFO(app->dai), event);
     return TRUE;
 }
@@ -2278,9 +2260,6 @@ menu_show(MenuData *menu)
     gtk_window_present(GTK_WINDOW(menu->window));
     gtk_widget_grab_focus(menu->search_entry);
 
-    /* GTK focus alone does not route X11 key events to an override-redirect
-     * window; take the seat's keyboard explicitly. Same idiom on_dock_press
-     * already uses for pointer grabs during drag. */
     GdkSeat *seat = gdk_display_get_default_seat(gdk_display_get_default());
     gdk_seat_grab(seat, gtk_widget_get_window(menu->window),
                   GDK_SEAT_CAPABILITY_KEYBOARD, TRUE,
@@ -2313,15 +2292,6 @@ menu_create(void)
     gtk_window_set_skip_taskbar_hint(GTK_WINDOW(menu->window), TRUE);
     gtk_window_set_skip_pager_hint(GTK_WINDOW(menu->window), TRUE);
     gtk_window_set_keep_above(GTK_WINDOW(menu->window), TRUE);
-    /*
-     * GTK_WINDOW_POPUP is override-redirect: the WM (Marco) never assigns
-     * it input focus by policy, regardless of gtk_widget_grab_focus(),
-     * which only sets GTK's internal focus widget and does nothing at the
-     * X11 level. Without DIALOG type-hint + an explicit keyboard grab on
-     * show, the search entry never receives key events and "search-changed"
-     * never fires. The instance popup and drag ghost stay GTK_WINDOW_POPUP
-     * correctly — neither takes text input — so this is scoped to the menu.
-     */
     gtk_window_set_type_hint(GTK_WINDOW(menu->window), GDK_WINDOW_TYPE_HINT_DIALOG);
     gtk_window_set_accept_focus(GTK_WINDOW(menu->window), TRUE);
     
@@ -2384,15 +2354,25 @@ static void
 identity_register(const char *desktop_id, GtkWidget *widget)
 {
     if (!desktop_id || !desktop_id[0] || !widget) return;
-    if (!g_hash_table_contains(g_shell->identity_table, desktop_id))
-        g_hash_table_insert(g_shell->identity_table, g_strdup(desktop_id), widget);
+    if (!GTK_IS_WIDGET(widget)) {
+        g_warning("identity_register: refusing to register non-widget for '%s'", desktop_id);
+        return;
+    }
+    g_hash_table_insert(g_shell->identity_table, g_strdup(desktop_id), widget);
 }
 
 static GtkWidget *
 identity_lookup(const char *desktop_id)
 {
     if (!desktop_id || !desktop_id[0]) return NULL;
-    return g_hash_table_lookup(g_shell->identity_table, desktop_id);
+    gpointer widget = g_hash_table_lookup(g_shell->identity_table, desktop_id);
+    if (!widget) return NULL;
+    if (!GTK_IS_WIDGET(widget)) {
+        g_warning("identity_lookup: evicting stale/dangling entry for '%s'", desktop_id);
+        g_hash_table_remove(g_shell->identity_table, desktop_id);
+        return NULL;
+    }
+    return GTK_WIDGET(widget);
 }
 
 static void
@@ -3122,32 +3102,45 @@ on_dock_release(GtkWidget *widget, GdkEventButton *event, gpointer user_data)
                 wnck_window_activate(target, (guint32)event->time);
             }
         }
+    } else if (!g_shell->drag_app) {
+        g_warning("on_dock_release: was_drag set but drag_app is NULL; aborting pin commit");
     } else {
         const char *dragged_id = g_app_info_get_id(g_shell->drag_app);
         int insert_at = g_shell->drag_insert_index;
         char *remaining[64];
         int remaining_count = 0;
-        for (int i = 0; i < g_shell->pinned_count; i++)
+        for (int i = 0; i < g_shell->pinned_count && remaining_count < 64; i++)
             if (g_strcmp0(g_shell->pinned_ids[i], dragged_id) != 0)
                 remaining[remaining_count++] = g_shell->pinned_ids[i];
-        
-        int clamped_index = CLAMP(insert_at, 0, remaining_count);
-        int new_count = 0;
-        for (int i = 0; i < clamped_index; i++)
-            g_shell->pinned_ids[new_count++] = remaining[i];
-        g_shell->pinned_ids[new_count++] = g_strdup(dragged_id);
-        for (int i = clamped_index; i < remaining_count; i++)
-            g_shell->pinned_ids[new_count++] = remaining[i];
-        g_shell->pinned_count = new_count;
+
+        if (remaining_count >= 64) {
+            g_warning("on_dock_release: pinned app limit (64) reached; "
+                      "dropping this app from the dock without adding '%s'",
+                      dragged_id ? dragged_id : "(null)");
+            g_shell->pinned_count = remaining_count;
+            for (int i = 0; i < remaining_count; i++)
+                g_shell->pinned_ids[i] = remaining[i];
+        } else {
+            int clamped_index = CLAMP(insert_at, 0, remaining_count);
+            int new_count = 0;
+            for (int i = 0; i < clamped_index; i++)
+                g_shell->pinned_ids[new_count++] = remaining[i];
+            g_shell->pinned_ids[new_count++] = g_strdup(dragged_id);
+            for (int i = clamped_index; i < remaining_count; i++)
+                g_shell->pinned_ids[new_count++] = remaining[i];
+            g_shell->pinned_count = new_count;
+        }
         save_config();
     }
     
     if (g_shell->drag_ghost) { gtk_widget_destroy(g_shell->drag_ghost); g_shell->drag_ghost = NULL; }
     if (g_shell->drag_app)   { g_object_unref(g_shell->drag_app);   g_shell->drag_app = NULL; }
     g_shell->drag_active = FALSE;
-    
+    g_shell->drag_widget = NULL;
+
     for (int i = 0; i < g_shell->slot_count; i++) {
         DockSlot *slot = g_shell->slots[i];
+        if (!slot) continue;
         slot->gap_margin_start_target = 0;
         slot->gap_margin_end_target = 0;
         if (!slot->gap_anim_id)
@@ -3413,7 +3406,6 @@ typedef struct {
     gchar *object_path;
 } PendingSNIRegistration;
 
-/* Type-safe GdkPixbufDestroyNotify wrapper to avoid cast warning */
 static void
 pixbuf_free_wrapper(guchar *pixels, gpointer data)
 {
@@ -4035,25 +4027,10 @@ main(int argc, char **argv)
     g_shell->shelf_wifi_icon = gtk_image_new_from_icon_name("network-wireless-offline-symbolic", GTK_ICON_SIZE_MENU);
     gtk_image_set_pixel_size(GTK_IMAGE(g_shell->shelf_wifi_icon), 15);
 
-    /*
-     * Same no_show_all pattern as battery_box, but this widget is a leaf
-     * (no children), so there's no show_all()-recursion trap here — the
-     * icon itself is the thing whose visibility toggles.
-     */
     g_shell->shelf_battery_icon = gtk_image_new_from_icon_name("battery-full-symbolic", GTK_ICON_SIZE_MENU);
     gtk_image_set_pixel_size(GTK_IMAGE(g_shell->shelf_battery_icon), 15);
     gtk_widget_set_no_show_all(g_shell->shelf_battery_icon, TRUE);
 
-    /*
-     * Uniform box spacing is optically wrong here: symbolic icons render
-     * into a padded canvas whose built-in margin varies per glyph (a
-     * battery outline fills its square more than a wifi arc does), while
-     * the clock label's bounding box hugs its actual ink with no padding
-     * of its own. The same spacing value next to two icons reads as much
-     * larger than that value next to an icon and text. Spacing is set to
-     * 0 and each gap is an explicit, individually-tuned margin instead of
-     * one shared number standing in for two different kinds of gap.
-     */
     GtkWidget *status_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
     gtk_widget_set_margin_end(g_shell->shelf_wifi_icon, 5);
     gtk_widget_set_margin_end(g_shell->shelf_battery_icon, 9);
