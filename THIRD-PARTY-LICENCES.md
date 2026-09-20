@@ -98,16 +98,16 @@ GPL-2.0-only is **incompatible with AGPLv3** for the purpose of forming a single
 combined work. That is not a problem here, and the reason is worth stating
 precisely because it constrains future changes:
 
-- `numate-settings` is a **separate program in a separate process**. The shell
-  launches it by name via `launch_cmd_cb` — fork and exec, no linking, no
+- `numate-settings` is a **separate program in a separate process**. axiom-panel
+  launches it by name — fork and exec, no linking, no
   shared address space, no `dlopen`.
 - Two programs that merely invoke each other are *aggregation*, not a combined
   work. Each keeps its own licence. This is the same relationship any shell has
   with any program it starts.
 
-**What this forbids, permanently:** never link NuMate-Settings code into the
-NuMATE shell, never `dlopen` it, never copy a panel's source into
-`gonzo-shell.c`, and never move the shell and the settings app into one binary.
+**What this forbids, permanently:** never link NuMate-Settings code into
+axiom-panel, never `dlopen` it, never copy a settings panel's source into
+`axiom-panel/`, and never move the panel and the settings app into one binary.
 Any of those creates a combined work of GPL-2.0-only and AGPLv3 code, which
 cannot be lawfully distributed. Keeping them in separate repositories makes that
 boundary hard to cross by accident — which is the strongest argument for the

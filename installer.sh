@@ -3,7 +3,7 @@
 # NuMATE — Desktop Environment Installer
 #
 # Takes a Devuan system with the standard MATE desktop and turns it into
-# NuMATE: MATE's session infrastructure underneath, NuMATE's shell and
+# NuMATE: MATE's session infrastructure underneath, axiom-panel and
 # NuMate-Settings on top, with a curated application set.
 #
 # This installer is a DESKTOP ENVIRONMENT installer and nothing else.
@@ -16,11 +16,11 @@
 #   4. Default-application bindings
 #   5. Fonts, themes, cursors, icons, Nemo integration
 #   6. NuMate-Settings   (fetched from GitHub — the only settings app)
-#   7. NuMATE shell     (built from bin/gonzo-shell.c in this repo)
+#   7. axiom-panel     (vendored in axiom-panel/; its install.sh is the install path)
 #   8. Desktop defaults (system-wide dconf + live session)
 #
 # ── Run this from inside a clone of the NuMATE repo. ──────────────────────
-# It resolves repo assets (theme/, nemo/, bin/, backgrounds/) relative to
+# It resolves repo assets (theme/, nemo/, bin/, axiom-panel/, backgrounds/) relative to
 # its own path. `curl ... | bash` has no "own path" — $0 would be `bash` —
 # so those stages would silently find nothing. Clone first, then run.
 #
@@ -32,7 +32,7 @@
 #   ./installer.sh                  — full install
 #   ./installer.sh --skip-theme     — skip fonts/themes/cursors
 #   ./installer.sh --skip-settings  — skip fetching/building NuMate-Settings
-#   ./installer.sh --skip-shell     — skip building the NuMATE shell
+#   ./installer.sh --skip-shell     — skip building axiom-panel
 #   ./installer.sh --dry-run        — print every stage, change nothing
 #
 # ── Developer options ─────────────────────────────────────────────────────
@@ -63,6 +63,10 @@ SCRIPT_DIR="$(readlink -f "$(dirname "$0")")"
 # The pkg-config module each -dev package provides is noted where the names
 # differ, since that mapping is not guessable (module "libnm" comes from
 # package libnm-dev; module "mate-desktop-2.0" from libmate-desktop-dev).
+#
+# axiom-panel's build surface is a subset of this list (gtk+-3.0, gdk-x11-3.0,
+# x11, gio-unix-2.0). The extras exist for NuMate-Settings. One list, so a
+# package added for settings cannot be forgotten when stage 7 runs alone.
 BUILD_TOOLCHAIN="gcc make pkg-config"
 
 BUILD_LIBS="libgtk-3-dev \
@@ -75,9 +79,8 @@ libxcursor-dev \
 libnm-dev \
 libx11-dev"
 
-# Shell-only additions. The shell links wnck, json-glib and dbusmenu, which
-# the settings app does not use.
-SHELL_LIBS="libwnck-3-dev libjson-glib-dev libdbusmenu-gtk3-dev"
+# axiom-panel modules. Verified by pkg-config in stage 7, not by package name.
+PANEL_PKGS="gtk+-3.0 gdk-x11-3.0 x11 gio-unix-2.0"
 
 SETTINGS_OWNER="TTR-IND"
 SETTINGS_NAME="NuMate-Settings"
@@ -121,7 +124,7 @@ for _arg in "$@"; do
                 "4  Default application bindings" \
                 "5  Fonts, themes, cursors, Nemo integration" \
                 "6  NuMate-Settings" \
-                "7  NuMATE shell" \
+                "7  axiom-panel" \
                 "8  Desktop defaults"
             exit 0 ;;
         --help|-h)
@@ -455,7 +458,7 @@ printf "    %s\n" \
     "install Nemo, Engrampa, Pluma, Waterfox and GParted as the defaults" \
     "install NuMATE fonts, themes, cursors and Nemo integration" \
     "fetch and build NuMate-Settings — the single settings application" \
-    "build the NuMATE shell and autostart it in the MATE session"
+    "build axiom-panel and register it as the MATE panel component"
 printf "\n  ${_dim}It will NOT touch your kernel, display server, or init system.${_rst}\n"
 
 # Refresh sudo once up front so the long apt stages don't stall on a
@@ -490,8 +493,8 @@ stage "Removing the MATE components NuMATE replaces"
 #   mate-power-preferences  → /usr/bin/mate-power-preferences, shipped by
 #                             mate-power-manager. That same package also
 #                             ships /usr/sbin/mate-power-backlight-helper
-#                             and org.mate.power.policy, which the NuMATE
-#                             shell calls for permission-free brightness
+#                             and org.mate.power.policy, which axiom-panel
+#                             calls for permission-free brightness
 #                             control. Purging the package to get rid of
 #                             the preferences GUI would take the backlight
 #                             backend with it and break the shell's
@@ -550,7 +553,7 @@ Name=MATE Power Preferences
 Exec=/usr/bin/mate-power-preferences
 NoDisplay=true
 # NuMATE: hidden, not removed. Its package (mate-power-manager) also ships
-# the backlight helper and polkit policy the NuMATE shell needs for
+# the backlight helper and polkit policy axiom-panel needs for
 # brightness control. NuMate-Settings owns power configuration instead.
 MASK_POWER_PREFS
 fi
@@ -922,118 +925,217 @@ else
 fi
 }
 
-# ═══ 7 ═══ NuMATE shell ════════════════════════════════════════════════════
+# ═══ 7 ═══ axiom-panel ═════════════════════════════════════════════════════
 stage_7() {
-if [ "$OPT_SKIP_SHELL" -eq 1 ]; then
-    stage "NuMATE shell"
-    warn "--skip-shell: skipping — you will log into a session with no shell"
-else
-    stage "Building the NuMATE shell"
-
-    apt_install "shell dependencies" $BUILD_TOOLCHAIN $BUILD_LIBS $SHELL_LIBS \
-        && ok "shell build dependencies" \
-        || die "shell dependency install failed — see the apt output above"
-
-    _shell_src="$SCRIPT_DIR/bin/gonzo-shell.c"
-    if [ ! -f "$_shell_src" ]; then
-        warn "bin/gonzo-shell.c not found — shell build skipped"
-    elif [ "$OPT_DRY_RUN" -eq 1 ]; then
-        info "[dry-run] compile gonzo-shell.c → /usr/local/bin/gonzo-shell"
-    else
-        _build="$(mktemp -d)"
-        gcc "$_shell_src" -o "$_build/gonzo-shell" \
-            $(pkg-config --cflags --libs gtk+-3.0 libwnck-3.0 json-glib-1.0 \
-                          libmatemixer dbusmenu-gtk3-0.4) \
-            -lX11 -lm -DWNCK_I_KNOW_THIS_IS_UNSTABLE \
-            && ok "shell compiled" \
-            || die "shell build failed — see the compiler output above"
-
-        # Replacing a binary while the old one runs leaves a stale process
-        # holding the previous inode. These are the invoking user's own
-        # processes; no root needed to signal them.
+# gonzo-shell is discontinued. Remove it even when --skip-shell is set, so a
+# partial re-run cannot leave the old binary registered as a session component.
+_retire_gonzo() {
+    run sudo rm -f /usr/local/bin/gonzo-shell \
+                   /usr/bin/gonzo-shell \
+                   "$HOME/.local/bin/gonzo-shell"
+    run sudo rm -f /usr/share/applications/numate-shell.desktop \
+                   /etc/xdg/autostart/numate-shell.desktop \
+                   "$HOME/.config/autostart/numate-shell.desktop" \
+                   "$HOME/.local/share/applications/numate-shell.desktop"
+    if [ "$OPT_DRY_RUN" -eq 0 ]; then
         pkill -9 gonzo-shell 2>/dev/null || true
+    fi
+}
 
-        sudo install -Dm755 "$_build/gonzo-shell" /usr/local/bin/gonzo-shell
-        ok "gonzo-shell → /usr/local/bin/"
-        rm -rf "$_build"
+if [ "$OPT_SKIP_SHELL" -eq 1 ]; then
+    stage "axiom-panel"
+    _retire_gonzo
+    warn "--skip-shell: skipping — you will log into a session with no panel"
+else
+    stage "Building axiom-panel"
+
+    _retire_gonzo
+    ok "gonzo-shell retired (binary, desktop entries, running process)"
+
+    apt_install "panel dependencies" $BUILD_TOOLCHAIN $BUILD_LIBS \
+        && ok "axiom-panel build dependencies" \
+        || die "panel dependency install failed — see the apt output above"
+
+    _panel_src="$SCRIPT_DIR/axiom-panel"
+    if [ ! -f "$_panel_src/install.sh" ] || [ ! -f "$_panel_src/Makefile" ]; then
+        die "axiom-panel/ not found at $_panel_src — cannot install the panel"
     fi
 
-    # ── Register the shell as a SESSION COMPONENT, not an autostart entry ──
-    # This is the part that makes the shell the interface rather than just
-    # another program that happens to start.
-    #
-    # mate-session tracks three required components in
-    # org.mate.session.required-components: windowmanager, panel, filemanager.
-    # Stage 2 purged mate-panel, but that key still names "mate-panel" — so
-    # mate-session starts a session, fails to launch its required panel, and
-    # depending on version either logs it or throws a "component failed"
-    # dialogue on every login. Leaving the key stale and bolting the shell on
-    # via /etc/xdg/autostart would paper over that: the shell would appear,
-    # and the session would still be reporting a missing required component
-    # underneath.
-    #
-    # Naming the shell as the panel component fixes the cause. It also buys
-    # restart-on-crash for free — mate-session relaunches required components,
-    # which an autostart entry does not guarantee.
-    #
-    # Required components are looked up in /usr/share/applications by desktop
-    # id, NOT in /etc/xdg/autostart, so the entry goes there.
-    run sudo install -d /usr/share/applications
+    # Verify the modules axiom-panel's Makefile actually consumes.
     if [ "$OPT_DRY_RUN" -eq 0 ]; then
-        sudo tee /usr/share/applications/numate-shell.desktop >/dev/null <<'SHELL_COMPONENT'
+        _unresolved=""
+        for _m in $PANEL_PKGS; do
+            pkg-config --exists "$_m" 2>/dev/null || _unresolved="$_unresolved $_m"
+        done
+        if [ -n "$_unresolved" ]; then
+            warn "these pkg-config modules do not resolve:$_unresolved"
+            die "the panel build cannot succeed until they do"
+        fi
+        ok "axiom-panel pkg-config modules resolve"
+    fi
+
+    # PREFIX=/usr/local: one binary for every account. axiom-panel/install.sh
+    # is the install path — it builds, installs the binary, writes the
+    # mate-panel.desktop intercept for THIS user, patches a saved session,
+    # and points org.mate.session.required-components.panel at "mate-panel"
+    # so mate-session keeps resolving the stock component id through the
+    # shadowed desktop file. No custom session-component id. No autostart
+    # wrapper script.
+    if [ "$OPT_DRY_RUN" -eq 1 ]; then
+        info "[dry-run] PREFIX=/usr/local $_panel_src/install.sh"
+    else
+        if ! PREFIX=/usr/local "$_panel_src/install.sh"; then
+            die "axiom-panel/install.sh failed"
+        fi
+        ok "axiom-panel installed via axiom-panel/install.sh"
+        if command -v axiom-panel >/dev/null 2>&1; then
+            ok "axiom-panel on PATH"
+        else
+            warn "axiom-panel is NOT on PATH after install"
+        fi
+    fi
+
+    # install.sh writes the intercept under the invoking user's XDG dirs.
+    # New accounts never see those. After stage 2 purged the mate-panel
+    # package, /usr/share/applications/mate-panel.desktop is gone — write
+    # the same intercept system-wide so every account resolves the stock
+    # component id the same way.
+    _panel_bin=/usr/local/bin/axiom-panel
+    run sudo install -d /usr/share/applications /etc/xdg/autostart
+    if [ "$OPT_DRY_RUN" -eq 0 ]; then
+        sudo tee /usr/share/applications/mate-panel.desktop >/dev/null <<PANEL_DESKTOP
 [Desktop Entry]
 Type=Application
-Name=NuMATE Shell
-Comment=Desktop shell — dock, launcher, tray, notifications
-Exec=/usr/local/bin/gonzo-shell
+Name=Panel
+Comment=Axiom-Shell panel for MATE
+Icon=mate-panel
+Exec=$_panel_bin
+StartupNotify=true
+Terminal=false
+Categories=GTK;System;Core;
 OnlyShowIn=MATE;
-X-MATE-Autostart-Phase=Panel
-X-MATE-Autostart-Notify=true
-X-MATE-AutoRestart=true
 NoDisplay=true
-SHELL_COMPONENT
+X-MATE-AutoRestart=true
+X-MATE-Autostart-Phase=Panel
+X-MATE-Provides=panel
+X-MATE-Autostart-Notify=true
+X-GNOME-Autostart-Phase=Panel
+PANEL_DESKTOP
+        sudo cp /usr/share/applications/mate-panel.desktop \
+                /usr/share/applications/axiom-panel.desktop
+        sudo cp /usr/share/applications/mate-panel.desktop \
+                /etc/xdg/autostart/mate-panel.desktop
     fi
-    ok "session component → /usr/share/applications/numate-shell.desktop"
+    ok "panel intercept → /usr/share/applications/mate-panel.desktop"
+    ok "panel autostart → /etc/xdg/autostart/mate-panel.desktop"
 
-    # An autostart entry from a previous NuMATE install would now launch a
-    # SECOND shell alongside the session component — two docks, two trays,
-    # two processes racing for the same StatusNotifier bus name. Remove it.
-    if [ -f /etc/xdg/autostart/numate-shell.desktop ]; then
-        run sudo rm -f /etc/xdg/autostart/numate-shell.desktop
-        ok "removed stale autostart entry (superseded by session component)"
-    fi
-
-    # Point the session at it. Written system-wide in stage 8 as well, for
-    # accounts that do not exist yet; set live here so the very next login
-    # of THIS user already uses it.
-    if [ "$OPT_DRY_RUN" -eq 0 ] && [ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
-        gsettings set org.mate.session.required-components panel 'numate-shell' 2>/dev/null \
-            && ok "session panel component → numate-shell" \
-            || warn "could not set required panel component — check schema is installed"
-    else
-        info "no session bus — session components set at next login via dconf"
-    fi
-
-    # ── Nemo as the desktop ────────────────────────────────────────────────
-    # Nemo ships nemo-autostart.desktop, but it is gated OnlyShowIn=X-Cinnamon
-    # — MATE does not advertise itself as X-Cinnamon, so that entry never
-    # fires here. nemo-desktop itself has no session check; only the .desktop
-    # file does. This entry removes a Cinnamon-only gate that was never
-    # applicable, rather than working around anything.
-    if [ "$OPT_DRY_RUN" -eq 0 ]; then
-        sudo tee /etc/xdg/autostart/numate-nemo-desktop.desktop >/dev/null <<'NEMO_AUTOSTART'
+    # ── Nemo as the desktop, the way Caja is the desktop ───────────────────
+    # mate-session required-components.filemanager defaults to "caja".
+    # Stage 2 purged caja. The key was left at the schema default, so every
+    # login the session looks up /usr/share/applications/caja.desktop, finds
+    # nothing, and waits out the Desktop phase. That is the delay. The
+    # Applications-phase autostart of nemo-desktop then fires late, and a
+    # saved-session or a filemanager=nemo binding launches `nemo %U` — a
+    # folder window — which is the mystery window.
+    #
+    # Caja is not an autostart entry. It is a required component whose
+    # desktop file lives in /usr/share/applications, Exec=caja, Provides=
+    # filemanager, Phase=Desktop. Nemo-desktop takes that slot. The binary
+    # is nemo-desktop, not nemo: nemo.desktop is Exec=nemo %U and must never
+    # be the component id.
+    #
+    # X-MATE-Autostart-Notify is omitted. Caja speaks the mate-session
+    # notify protocol; nemo-desktop does not. Setting Notify=true would
+    # recreate the delay we are removing.
+    #
+    # Phase is Panel, not Desktop. mate-session does not start the
+    # Desktop phase until every Panel-phase client RegisterClient()s
+    # or GSM_MANAGER_PHASE_TIMEOUT (30s) fires. axiom-panel now
+    # registers after its strut is on the root window, which ends the
+    # phase in milliseconds — but putting nemo-desktop in the same
+    # phase means both processes are spawned in one pass, so the
+    # desktop is not gated on the panel's D-Bus round-trip.
+    _nd_src="$SCRIPT_DIR/nemo/nemo-desktop.desktop"
+    run sudo install -d /usr/share/applications
+    if [ -f "$_nd_src" ]; then
+        run sudo install -Dm644 "$_nd_src" /usr/share/applications/nemo-desktop.desktop
+        run sudo install -Dm644 "$_nd_src" /etc/xdg/autostart/nemo-desktop.desktop
+    elif [ "$OPT_DRY_RUN" -eq 0 ]; then
+        sudo tee /usr/share/applications/nemo-desktop.desktop >/dev/null <<'NEMO_DESKTOP'
 [Desktop Entry]
 Type=Application
 Name=Nemo Desktop
-Comment=Draws the desktop icons and background (NuMATE: not Cinnamon-gated)
+GenericName=Desktop
+Comment=Draws the desktop icons and background
 Exec=nemo-desktop
-AutostartCondition=GSettings org.nemo.desktop show-desktop-icons
-X-GNOME-AutoRestart=true
-X-MATE-Autostart-Phase=Desktop
+Icon=system-file-manager
+Terminal=false
+StartupNotify=false
 NoDisplay=true
-NEMO_AUTOSTART
+OnlyShowIn=MATE;
+X-MATE-Autostart-Phase=Panel
+X-MATE-AutoRestart=true
+X-MATE-Provides=filemanager
+NEMO_DESKTOP
+        sudo cp /usr/share/applications/nemo-desktop.desktop \
+                /etc/xdg/autostart/nemo-desktop.desktop
     fi
-    ok "Nemo desktop autostart → /etc/xdg/autostart/"
+    ok "session component → /usr/share/applications/nemo-desktop.desktop"
+    ok "desktop autostart → /etc/xdg/autostart/nemo-desktop.desktop"
+
+    # A previous NuMATE install put nemo-desktop on XDG autostart. Required
+    # components are not autostart entries; leaving both starts two copies.
+    if [ -f /etc/xdg/autostart/numate-nemo-desktop.desktop ]; then
+        run sudo rm -f /etc/xdg/autostart/numate-nemo-desktop.desktop
+        ok "removed stale nemo-desktop autostart (superseded by session component)"
+    fi
+    run sudo rm -f "$HOME/.config/autostart/numate-nemo-desktop.desktop"
+
+    # Stock Nemo ships /etc/xdg/autostart/nemo-autostart.desktop gated
+    # OnlyShowIn=X-Cinnamon. Harmless on a MATE session that honours that
+    # key. Mask it anyway so a session that does not cannot double-start.
+    if [ -f /etc/xdg/autostart/nemo-autostart.desktop ]; then
+        run sudo install -d /etc/xdg/autostart
+        if [ "$OPT_DRY_RUN" -eq 0 ]; then
+            sudo tee /etc/xdg/autostart/nemo-autostart.desktop >/dev/null <<'NEMO_MASK'
+[Desktop Entry]
+Type=Application
+Name=Nemo
+Exec=nemo-desktop
+OnlyShowIn=X-Cinnamon;
+Hidden=true
+X-MATE-Autostart-enabled=false
+NoDisplay=true
+NEMO_MASK
+        fi
+        ok "masked stock Cinnamon nemo-autostart"
+    fi
+
+    if [ "$OPT_DRY_RUN" -eq 0 ] && [ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
+        gsettings set org.mate.session.required-components filemanager 'nemo-desktop' 2>/dev/null \
+            && ok "session filemanager component → nemo-desktop" \
+            || warn "could not set required filemanager component"
+    else
+        info "no session bus — filemanager component set at next login via dconf"
+    fi
+
+    # Saved sessions restore whatever was running last logout. A restored
+    # `nemo` (the file manager) is the mystery window. Drop those entries
+    # for every real account; leave nemo-desktop alone if present.
+    if [ "$OPT_DRY_RUN" -eq 0 ]; then
+        while IFS=: read -r _u _p _uid _gid _gecos _home _sh; do
+            [ "$_uid" -ge 1000 ] && [ "$_uid" -lt 60000 ] || continue
+            _saved="$_home/.config/mate-session/saved-session"
+            [ -d "$_saved" ] || continue
+            for _f in "$_saved"/*.desktop; do
+                [ -f "$_f" ] || continue
+                if grep -qE '^Exec=(nemo)( |$)' "$_f" && ! grep -qE '^Exec=nemo-desktop\b' "$_f"; then
+                    sudo rm -f "$_f"
+                fi
+            done
+        done < /etc/passwd
+        ok "cleared saved-session entries that launch windowed Nemo"
+    fi
 fi
 }
 
@@ -1064,27 +1166,20 @@ document-font-name='$DOC_FONT'
 theme='$WM_THEME'
 
 [org/mate/session/required-components]
-# The shell IS the interface, so it is a required session component rather
-# than an autostart entry: mate-session brings it up as part of the session
-# and restarts it if it dies. Stage 2 purged mate-panel, so leaving the
-# stock value here would leave every session reporting a missing required
-# component. Values are desktop ids resolved from /usr/share/applications.
+# Keep the component id as mate-panel. Stage 2 purged the mate-panel
+# package; stage 7 replaced /usr/share/applications/mate-panel.desktop
+# with an intercept whose Exec is axiom-panel. mate-session still looks
+# up the stock id, XDG resolves our file, axiom-panel starts. Changing
+# the id would require a second desktop file and a second gsettings
+# write for no gain — that was the gonzo-shell path, and it is gone.
 #
-# filemanager is intentionally left unset (stock default: caja, which we've
-# purged, but this key is never read for anything caja provided here). This
-# key means "block session startup on this desktop-id's window appearing and
-# supervise it as a session component" — that contract is for panel/wm/a11y,
-# not for a file manager window. Caja was never registered against it either;
-# desktop-icon drawing under Caja was a property of Caja's own session
-# integration, not of this key. Nemo has no equivalent: nemo.desktop launches
-# the file manager window (Exec=nemo %U), and pointing this key at it makes
-# mate-session stall the entire session waiting for a file manager window to
-# appear, then treats that window as a supervised component — hence the
-# startup delay and the spurious Nemo window. The desktop itself (icons,
-# background, right-click menu) is nemo-desktop, a separate binary, launched
-# unconditionally by the ordinary autostart entry below. That is the correct
-# and only hook point; this key must not also point at Nemo.
-panel='numate-shell'
+# filemanager takes caja's slot. The desktop id is nemo-desktop, whose
+# Exec is nemo-desktop — the desktop process. nemo.desktop is the folder
+# window (Exec=nemo %U) and must not be this value: mate-session would
+# wait for a file-manager window before finishing the Desktop phase, then
+# treat that window as a supervised component.
+panel='mate-panel'
+filemanager='nemo-desktop'
 
 [org/mate/peripherals-mouse]
 cursor-theme='$CURSOR_THEME'
@@ -1109,6 +1204,11 @@ picture-options='zoom'
 # "deprecated" here means Nemo's preferences UI no longer exposes a
 # toggle, not that the key is inert.
 show-desktop-icons=true
+# nemo-desktop refuses to draw if it finds any _NET_WM_WINDOW_TYPE_DESKTOP
+# window whose WM_CLASS is not on this list. MATE's settings daemon and
+# axiom-panel are not Cinnamon; without this the process starts, skips
+# setup, and the desktop stays empty until a file-manager window appears.
+ignored-desktop-handlers=['conky', 'csd-background', 'msd-background', 'mate-settings-daemon', 'caja', 'Caja', 'axiom-panel', 'axiom-shell', 'mate-panel']
 
 [org/nemo/window-state]
 start-with-menu-bar=false
@@ -1175,8 +1275,10 @@ if [ "$OPT_DRY_RUN" -eq 0 ] && [ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
     gsettings set org.mate.background picture-filename "$WALLPAPER_DEST"
     gsettings set org.mate.background picture-options 'zoom'
     gsettings set org.nemo.desktop show-desktop-icons true
+    gsettings set org.nemo.desktop ignored-desktop-handlers "['conky', 'csd-background', 'msd-background', 'mate-settings-daemon', 'caja', 'Caja', 'axiom-panel', 'axiom-shell', 'mate-panel']"
     gsettings set org.nemo.window-state start-with-menu-bar false
-    gsettings set org.mate.session.required-components panel 'numate-shell' 2>/dev/null || true
+    gsettings set org.mate.session.required-components panel 'mate-panel' 2>/dev/null || true
+    gsettings set org.mate.session.required-components filemanager 'nemo-desktop' 2>/dev/null || true
     ok "defaults applied to the current session"
 else
     info "no session bus detected — defaults will apply at next login"
@@ -1224,7 +1326,7 @@ printf "${_c}    ╰────────────────────
 printf "  ${_b}Desktop${_rst}\n"
 printf "    %s\n" \
     "MATE session infrastructure (session manager, settings daemon, marco)" \
-    "NuMATE shell — the interface: dock, launcher, tray, notifications" \
+    "axiom-panel — the interface: dock, launcher, tray, status" \
     "NuMate-Settings — the single settings application" \
     "Nemo — file manager and desktop"
 printf "\n  ${_b}Applications${_rst}\n"
@@ -1237,7 +1339,7 @@ printf "\n  ${_b}Next${_rst}\n"
 printf "    %s\n" \
     "Reboot to start NuMATE — you will be prompted below."
 printf "\n  ${_dim}mate-power-manager was kept deliberately: its preferences GUI is${_rst}\n"
-printf "  ${_dim}hidden, but the backlight helper the shell needs is still there.${_rst}\n\n"
+printf "  ${_dim}hidden, but the backlight helper axiom-panel needs is still there.${_rst}\n\n"
 
 # ── Reboot ─────────────────────────────────────────────────────────────────
 # A reboot rather than just a re-login: this run replaced the session's

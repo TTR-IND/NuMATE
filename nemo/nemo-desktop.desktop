@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Name=Nemo Desktop
+GenericName=Desktop
+Comment=Draws the desktop icons and background
+Exec=nemo-desktop
+Icon=system-file-manager
+Terminal=false
+StartupNotify=false
+NoDisplay=true
+OnlyShowIn=MATE;
+X-MATE-Autostart-Phase=Panel
+X-MATE-Autostart-enabled=true
+X-MATE-AutoRestart=true
+X-MATE-Provides=filemanager

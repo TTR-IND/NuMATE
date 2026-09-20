@@ -31,8 +31,8 @@ The installer calls `sudo` itself for the steps that need root. Running the whol
 thing as root breaks the final stage, which writes into your live session's dconf
 and needs your real `DISPLAY` and `DBUS_SESSION_BUS_ADDRESS`.
 
-`curl | bash` will not work — the installer resolves `theme/`, `nemo/` and `bin/`
-relative to its own path, and a piped invocation has no own path. Clone first.
+`curl | bash` will not work — the installer resolves `theme/`, `nemo/`, `bin/`
+and `axiom-panel/` relative to its own path, and a piped invocation has no own path. Clone first.
 
 ### Options
 
@@ -41,7 +41,7 @@ relative to its own path, and a piped invocation has no own path. Clone first.
 | `--dry-run` | Print every stage, change nothing. Run this first. |
 | `--skip-theme` | Skip fonts, themes and cursors |
 | `--skip-settings` | Skip fetching and building NuMate-Settings |
-| `--skip-shell` | Skip building the NuMATE shell |
+| `--skip-shell` | Skip building axiom-panel |
 
 ### Developer options
 
@@ -91,10 +91,11 @@ kernel, the display server, or the init system.
    built with `make`. It is the only settings application; `mate-control-center`
    is gone. Only released versions are installed — if no release can be
    downloaded the stage stops rather than falling back to development code.
-7. **Shell** — builds `bin/gonzo-shell.c` and registers it as the MATE session's
-   **required `panel` component**, taking the slot `mate-panel` used to occupy.
-   Not an autostart entry: mate-session brings the shell up as part of the
-   session and restarts it if it dies. The shell *is* the interface.
+7. **axiom-panel** — builds the vendored `axiom-panel/` tree by running its own
+   `install.sh`. That script is the install path: it compiles the panel, installs
+   the binary, and intercepts the stock `mate-panel.desktop` lookup so
+   mate-session launches axiom-panel as the Panel component. The component id
+   stays `mate-panel`. gonzo-shell is removed if present.
 8. **Desktop defaults** — written both as system-wide dconf defaults (for
    accounts that do not exist yet) and directly into the current session.
 
@@ -119,7 +120,7 @@ it is `/usr/bin/mate-network-properties`, shipped by `mate-control-center`, whic
 
 | Piece | Source | Installed to |
 |---|---|---|
-| NuMATE shell | `bin/gonzo-shell.c` in this repo | `/usr/local/bin/gonzo-shell` |
+| axiom-panel | `axiom-panel/` in this repo | `/usr/local/bin/axiom-panel` |
 | NuMate-Settings | [its newest release](https://github.com/TTR-IND/NuMate-Settings/releases) | `/usr/local/bin/numate-settings` |
 | Wallpaper helper | `bin/numate-set-wallpaper` | `/usr/local/bin/` |
 | Nemo actions | `nemo/*.nemo_action` | `/usr/share/nemo/actions/` |
@@ -128,7 +129,7 @@ it is `/usr/bin/mate-network-properties`, shipped by `mate-control-center`, whic
 ## Licensing
 
 NuMATE is AGPLv3. **NuMate-Settings is GPL-2.0-only** and must therefore always
-remain a separate process launched by the shell — never linked into it. See the
+remain a separate process launched by axiom-panel — never linked into it. See the
 audit for why.
 
  Applications come from Devuan's own repositories; the GTK
@@ -138,8 +139,12 @@ repository, which is compatible but carries attribution obligations. See
 open items.
 
 NuMate-Settings is a **separate repository and a build-time dependency**, not a
-vendored copy. It owns the definition of how it is built; this installer clones it
-and calls its `install.sh` rather than duplicating that compile line.
+vendored copy. It owns the definition of how it is built; this installer fetches it
+and builds it with `make` rather than duplicating its compile line.
+
+axiom-panel is **vendored in this repository**. It owns the definition of how it
+is installed; the NuMATE installer calls `axiom-panel/install.sh` rather than
+duplicating that compile-and-register path.
 
 ## Why NuMATE?
 
@@ -164,7 +169,7 @@ It is **MATE modernised, not MATE reinvented**.
 
 Because apparently this needs to be said upfront:
 
-**The shell is written entirely by me.** I did it myself because I wanted it done right.
+**axiom-panel is written entirely by me.** I did it myself because I wanted it done right.
 
 AI was used with strict heuristic guidance for the following:
 
