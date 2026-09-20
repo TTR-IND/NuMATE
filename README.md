@@ -169,7 +169,7 @@ It is **MATE modernised, not MATE reinvented**.
 
 Because apparently this needs to be said upfront:
 
-**axiom-panel is written entirely by me.** I did it myself because I wanted it done right.
+**axiom-panel is written by me.** I did it myself because I wanted it done right. It is based on the tried and tested mate-panel code.
 
 AI was used with strict heuristic guidance for the following:
 
