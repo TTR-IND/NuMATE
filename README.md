@@ -94,8 +94,7 @@ kernel, the display server, or the init system.
 7. **axiom-panel** — builds the vendored `axiom-panel/` tree by running its own
    `install.sh`. That script is the install path: it compiles the panel, installs
    the binary, and intercepts the stock `mate-panel.desktop` lookup so
-   mate-session launches axiom-panel as the Panel component. The component id
-   stays `mate-panel`. gonzo-shell is removed if present.
+   mate-session launches axiom-panel as the Panel component.
 8. **Desktop defaults** — written both as system-wide dconf defaults (for
    accounts that do not exist yet) and directly into the current session.
 
