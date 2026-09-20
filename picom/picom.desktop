@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=NuMATE Compositor
+Comment=Picom compositor for the NuMATE session
+Exec=/usr/local/bin/numate-compositor
+Terminal=false
+NoDisplay=true
+OnlyShowIn=MATE;
+X-MATE-Autostart-Phase=Initialization
+X-MATE-Autostart-Notify=false
+X-GNOME-Autostart-Phase=Initialization

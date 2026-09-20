@@ -1,0 +1,32 @@
+#!/bin/sh
+# Start picom for a MATE session whose marco compositor is off.
+# Prefer the user's config, then the animated NuMATE config, then the
+# safe config if this picom cannot parse animation scripts.
+
+set -eu
+
+USER_CFG="${XDG_CONFIG_HOME:-$HOME/.config}/picom/picom.conf"
+FULL_CFG=/usr/share/numate/picom.conf
+SAFE_CFG=/usr/share/numate/picom-safe.conf
+
+if ! command -v picom >/dev/null 2>&1; then
+	echo "numate-compositor: picom is not installed" >&2
+	exit 1
+fi
+
+pkill -u "$(id -un)" -x picom 2>/dev/null || true
+pkill -u "$(id -un)" -x compton 2>/dev/null || true
+
+if [ -f "$USER_CFG" ]; then
+	exec picom --daemon --config "$USER_CFG"
+fi
+
+if [ -f "$FULL_CFG" ] && picom --config "$FULL_CFG" --daemon; then
+	exit 0
+fi
+
+if [ -f "$SAFE_CFG" ]; then
+	exec picom --daemon --config "$SAFE_CFG"
+fi
+
+exec picom --daemon --config /dev/null --backend xrender --vsync --fading

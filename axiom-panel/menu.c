@@ -149,12 +149,14 @@ on_search_changed(GtkSearchEntry *entry, MenuData *menu)
 static void
 menu_hide(MenuData *menu)
 {
-	gtk_widget_hide(menu->window);
 	gtk_entry_set_text(GTK_ENTRY(menu->search_entry), "");
 	if (menu->app_list)
 		gtk_list_box_unselect_all(GTK_LIST_BOX(menu->app_list));
 	if (menu->search_list)
 		gtk_list_box_unselect_all(GTK_LIST_BOX(menu->search_list));
+	if (!gtk_widget_get_visible(menu->window))
+		return;
+	anim_window_fade(menu->window, menu, 1.0, 0.0, ANIM_FADE_MS, TRUE);
 }
 
 static gboolean
@@ -221,6 +223,7 @@ menu_show(MenuData *menu)
 		return;
 
 	gtk_window_move(GTK_WINDOW(menu->window), -10000, -10000);
+	gtk_widget_set_opacity(menu->window, 0.0);
 	gtk_widget_show_all(menu->window);
 	while (gtk_events_pending())
 		gtk_main_iteration();
@@ -229,6 +232,7 @@ menu_show(MenuData *menu)
 	x = geo.x + 4;
 	y = geo.y + geo.height - PANEL_HEIGHT - MENU_GAP - alloc.height;
 	gtk_window_move(GTK_WINDOW(menu->window), x, y);
+	anim_window_fade(menu->window, menu, 0.0, 1.0, ANIM_FADE_MS, FALSE);
 	gtk_widget_grab_focus(menu->search_entry);
 }
 

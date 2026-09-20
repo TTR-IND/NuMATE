@@ -1027,6 +1027,24 @@ PANEL_DESKTOP
                 /etc/xdg/autostart/mate-panel.desktop
     fi
     ok "panel intercept → /usr/share/applications/mate-panel.desktop"
+
+    # axiom-panel owns org.freedesktop.Notifications. The stock daemon
+    # keeps the name if it starts first, and Notify never reaches the panel.
+    if [ "$OPT_DRY_RUN" -eq 0 ]; then
+        sudo tee /etc/xdg/autostart/mate-notification-daemon.desktop >/dev/null <<NOTIF_MASK
+[Desktop Entry]
+Type=Application
+Name=MATE Notification Daemon
+Exec=/bin/true
+OnlyShowIn=MATE;
+Hidden=true
+X-MATE-Autostart-enabled=false
+NoDisplay=true
+NOTIF_MASK
+        pkill -u "$(id -un)" -x mate-notification-daemon 2>/dev/null || true
+        pkill -u "$(id -un)" -x notification-daemon 2>/dev/null || true
+    fi
+    ok "mate-notification-daemon masked — axiom-panel owns Notify"
     ok "panel autostart → /etc/xdg/autostart/mate-panel.desktop"
 
     # ── Nemo as the desktop, the way Caja is the desktop ───────────────────
@@ -1136,6 +1154,34 @@ NEMO_MASK
         done < /etc/passwd
         ok "cleared saved-session entries that launch windowed Nemo"
     fi
+
+    # ── Picom replaces Marco's compositor ─────────────────────────────────
+    # Marco and picom cannot compose the same display. compositing-manager
+    # must be off before picom starts. Window hide/show motion lives in
+    # picom.conf; shell chrome motion lives in axiom-panel.
+    apt_install "compositor" picom \
+        && ok "picom installed" \
+        || warn "picom is not in this suite — window animations will be absent"
+
+    run sudo install -d /usr/share/numate /etc/xdg/autostart /usr/local/bin
+    if [ -f "$SCRIPT_DIR/picom/picom.conf" ]; then
+        run sudo install -Dm644 "$SCRIPT_DIR/picom/picom.conf" /usr/share/numate/picom.conf
+        run sudo install -Dm644 "$SCRIPT_DIR/picom/picom-safe.conf" /usr/share/numate/picom-safe.conf
+        run sudo install -Dm644 "$SCRIPT_DIR/picom/picom.desktop" /etc/xdg/autostart/numate-picom.desktop
+        run sudo install -Dm755 "$SCRIPT_DIR/bin/numate-compositor" /usr/local/bin/numate-compositor
+        ok "picom config → /usr/share/numate/picom.conf"
+        ok "picom autostart → /etc/xdg/autostart/numate-picom.desktop"
+    fi
+
+    if [ "$OPT_DRY_RUN" -eq 0 ] && [ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
+        gsettings set org.mate.Marco.general compositing-manager false 2>/dev/null \
+            && ok "Marco compositor off" \
+            || true
+        if command -v picom >/dev/null 2>&1 && [ -x /usr/local/bin/numate-compositor ]; then
+            /usr/local/bin/numate-compositor >/dev/null 2>&1 || true
+            ok "picom started for this session"
+        fi
+    fi
 fi
 }
 
@@ -1164,6 +1210,8 @@ document-font-name='$DOC_FONT'
 
 [org/mate/Marco/general]
 theme='$WM_THEME'
+# Picom owns composition. Two compositors on one display tear and lag.
+compositing-manager=false
 
 [org/mate/session/required-components]
 # Keep the component id as mate-panel. Stage 2 purged the mate-panel
@@ -1268,6 +1316,7 @@ if [ "$OPT_DRY_RUN" -eq 0 ] && [ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
     gsettings set org.mate.interface font-name "$UI_FONT"
     gsettings set org.mate.interface document-font-name "$DOC_FONT"
     gsettings set org.mate.Marco.general theme "$WM_THEME"
+    gsettings set org.mate.Marco.general compositing-manager false
     gsettings set org.mate.peripherals-mouse cursor-theme "$CURSOR_THEME"
     gsettings set org.mate.sound theme-name "$ICON_THEME"
     gsettings set org.mate.sound event-sounds true

@@ -4,7 +4,7 @@ CC      ?= gcc
 CFLAGS  += -O2 -Wall -Wextra -Wno-unused-parameter -Wno-deprecated-declarations $(shell pkg-config --cflags $(PKGS))
 LDFLAGS += $(shell pkg-config --libs $(PKGS)) -lm
 
-SRC := main.c menu.c windows.c status.c session.c
+SRC := main.c menu.c windows.c status.c session.c anim.c
 OBJ := $(SRC:.c=.o)
 
 axiom-panel: $(OBJ)

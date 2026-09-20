@@ -5,11 +5,17 @@
 #include <X11/Xlib.h>
 
 static GtkWidget *g_shelf;
+static GtkCssProvider *g_shelf_css;
+static int g_shelf_radius = 16;
+static int g_shelf_from = 16;
+static int g_shelf_to = 16;
 
 static const char css[] =
 	"window.axiom-panel { background: transparent; }"
-	".shelf { background: rgba(32, 33, 36, 0.96); border-radius: 16px 16px 0 0; }"
-	".shelf-flat { background: rgba(32, 33, 36, 0.96); border-radius: 0; }"
+	".shelf {"
+	"  background: rgba(32, 33, 36, 0.96);"
+	"  border-radius: 16px 16px 0 0;"
+	"}"
 	".card, #GonzoMenu {"
 	"  background-color: rgba(32, 33, 36, 0.98);"
 	"  border-radius: 16px;"
@@ -164,21 +170,48 @@ panel_ensure_rgba(GtkWidget *win)
 	gtk_widget_set_app_paintable(win, TRUE);
 }
 
+static void
+shelf_apply_radius(int r)
+{
+	char buf[96];
+
+	if (r < 0)
+		r = 0;
+	if (r > 16)
+		r = 16;
+	g_shelf_radius = r;
+	if (!g_shelf_css) {
+		g_shelf_css = gtk_css_provider_new();
+		gtk_style_context_add_provider_for_screen(
+			gdk_screen_get_default(),
+			GTK_STYLE_PROVIDER(g_shelf_css),
+			GTK_STYLE_PROVIDER_PRIORITY_APPLICATION + 1);
+	}
+	g_snprintf(buf, sizeof buf, ".shelf { border-radius: %dpx %dpx 0 0; }", r, r);
+	gtk_css_provider_load_from_data(g_shelf_css, buf, -1, NULL);
+}
+
+static void
+shelf_radius_tick(double t, gpointer user)
+{
+	(void)user;
+	shelf_apply_radius(g_shelf_from + (int)((g_shelf_to - g_shelf_from) * t));
+}
+
 void
 panel_set_shelf_rounded(GtkWidget *shelf, gboolean rounded)
 {
-	GtkStyleContext *ctx;
+	int target = rounded ? 16 : 0;
 
 	if (!shelf)
 		return;
-	ctx = gtk_widget_get_style_context(shelf);
-	if (rounded) {
-		gtk_style_context_remove_class(ctx, "shelf-flat");
-		gtk_style_context_add_class(ctx, "shelf");
-	} else {
-		gtk_style_context_remove_class(ctx, "shelf");
-		gtk_style_context_add_class(ctx, "shelf-flat");
-	}
+	if (!gtk_style_context_has_class(gtk_widget_get_style_context(shelf), "shelf"))
+		gtk_style_context_add_class(gtk_widget_get_style_context(shelf), "shelf");
+	if (target == g_shelf_to)
+		return;
+	g_shelf_from = g_shelf_radius;
+	g_shelf_to = target;
+	anim_run(shelf, 280, shelf_radius_tick, NULL, NULL);
 }
 
 gboolean

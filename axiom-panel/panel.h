@@ -24,6 +24,8 @@
 #define PREVIEW_CARD_H   (PREVIEW_THUMB_H + 36)
 #define PREVIEW_SHOW_MS  280
 #define PREVIEW_HIDE_MS  180
+#define ANIM_SLIDE_MS    240
+#define ANIM_FADE_MS     160
 
 void       panel_apply_css(void);
 void       panel_ensure_rgba(GtkWidget *win);
@@ -32,6 +34,16 @@ void       panel_place_bottom(GtkWidget *window);
 void       panel_apply_strut(GtkWidget *window);
 gboolean   panel_primary_geo(GdkRectangle *geo);
 void       panel_session_register(void);
+
+void       anim_cancel(gpointer key);
+void       anim_run(gpointer key, int ms,
+                    void (*tick)(double t, gpointer user),
+                    void (*done)(gpointer user),
+                    gpointer user);
+void       anim_window_slide(GtkWidget *win, gpointer key,
+                             int x, int y0, int y1, int ms, gboolean hide_after);
+void       anim_window_fade(GtkWidget *win, gpointer key,
+                            double a0, double a1, int ms, gboolean hide_after);
 
 GtkWidget *menu_section_new(GtkWidget *panel);
 GtkWidget *windows_section_new(GtkWidget *panel);

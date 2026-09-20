@@ -5,6 +5,7 @@
 #include <math.h>
 #include <pwd.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/utsname.h>
 #include <time.h>
@@ -356,6 +357,160 @@ find_or_create_group(const gchar *app_id, const gchar *app_name, const gchar *ap
 	return g;
 }
 
+static GDesktopAppInfo *
+desktop_for_token(const gchar *token)
+{
+	gchar *lower, *dashed, *id;
+	GDesktopAppInfo *app = NULL;
+	const gchar *stems[3];
+	guint i;
+
+	if (!token || !*token)
+		return NULL;
+	lower = g_ascii_strdown(token, -1);
+	dashed = g_strdup(lower);
+	for (id = dashed; *id; id++)
+		if (*id == '_' || *id == ' ')
+			*id = '-';
+	stems[0] = token;
+	stems[1] = lower;
+	stems[2] = dashed;
+	for (i = 0; i < 3 && !app; i++) {
+		id = g_str_has_suffix(stems[i], ".desktop")
+		     ? g_strdup(stems[i])
+		     : g_strdup_printf("%s.desktop", stems[i]);
+		app = g_desktop_app_info_new(id);
+		g_free(id);
+	}
+	g_free(dashed);
+	g_free(lower);
+	return app;
+}
+
+/*
+ * Yandex Browser (and a few other Chromium skins) leave SNI Title empty
+ * or set it to the process basename. Resolve the .desktop display name
+ * from the sender's /proc/<pid>/exe instead of trusting Title.
+ */
+static gchar *
+name_from_exe(const gchar *exe_path)
+{
+	GList *all, *l;
+	gchar *found = NULL, *exe_base;
+
+	if (!exe_path || !*exe_path)
+		return NULL;
+	exe_base = g_path_get_basename(exe_path);
+	all = g_app_info_get_all();
+	for (l = all; l && !found; l = l->next) {
+		const gchar *exec;
+		gchar *exec_base, *resolved;
+
+		if (!G_IS_DESKTOP_APP_INFO(l->data))
+			continue;
+		exec = g_app_info_get_executable(G_APP_INFO(l->data));
+		if (!exec)
+			continue;
+		if (exec[0] == '/') {
+			resolved = realpath(exec, NULL);
+			if (resolved && g_strcmp0(resolved, exe_path) == 0)
+				found = g_strdup(g_app_info_get_display_name(G_APP_INFO(l->data)));
+			g_free(resolved);
+		}
+		if (found)
+			break;
+		exec_base = g_path_get_basename(exec);
+		if (g_strcmp0(exec_base, exe_base) == 0)
+			found = g_strdup(g_app_info_get_display_name(G_APP_INFO(l->data)));
+		g_free(exec_base);
+	}
+	g_list_free_full(all, g_object_unref);
+	if (!found) {
+		gchar *dashed = g_strdup(exe_base);
+		GDesktopAppInfo *app;
+		gchar *p;
+
+		for (p = dashed; *p; p++)
+			if (*p == '_')
+				*p = '-';
+		app = desktop_for_token(dashed);
+		if (app) {
+			found = g_strdup(g_app_info_get_display_name(G_APP_INFO(app)));
+			g_object_unref(app);
+		}
+		g_free(dashed);
+	}
+	g_free(exe_base);
+	return found;
+}
+
+static gchar *
+name_from_bus(const gchar *bus_name)
+{
+	GDBusConnection *bus;
+	GVariant *pid_v;
+	gchar *found = NULL;
+	guint32 pid = 0;
+
+	if (!bus_name)
+		return NULL;
+	bus = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, NULL);
+	if (!bus)
+		return NULL;
+	pid_v = g_dbus_connection_call_sync(bus,
+		"org.freedesktop.DBus", "/org/freedesktop/DBus",
+		"org.freedesktop.DBus", "GetConnectionUnixProcessID",
+		g_variant_new("(s)", bus_name),
+		G_VARIANT_TYPE("(u)"), G_DBUS_CALL_FLAGS_NONE, 1000, NULL, NULL);
+	if (pid_v) {
+		g_variant_get(pid_v, "(u)", &pid);
+		g_variant_unref(pid_v);
+		if (pid > 0) {
+			gchar *link = g_strdup_printf("/proc/%u/exe", pid);
+			gchar real[4096];
+			ssize_t n;
+
+			n = readlink(link, real, sizeof(real) - 1);
+			if (n > 0) {
+				real[n] = '\0';
+				found = name_from_exe(real);
+			}
+			g_free(link);
+		}
+	}
+	g_object_unref(bus);
+	return found;
+}
+
+static void
+resolve_notify_identity(const gchar *app_name, const gchar *desktop_hint,
+                        const gchar *app_icon, gchar **out_name, gchar **out_icon)
+{
+	GDesktopAppInfo *app;
+
+	*out_name = NULL;
+	*out_icon = NULL;
+	app = desktop_for_token(desktop_hint);
+	if (!app)
+		app = desktop_for_token(app_name);
+	if (app) {
+		const gchar *name = g_app_info_get_display_name(G_APP_INFO(app));
+		GIcon *icon = g_app_info_get_icon(G_APP_INFO(app));
+
+		if (name && *name)
+			*out_name = g_strdup(name);
+		if (icon)
+			*out_icon = g_icon_to_string(icon);
+		g_object_unref(app);
+	}
+	if (!*out_name)
+		*out_name = g_strdup((app_name && *app_name) ? app_name : "Unknown App");
+	if (!*out_icon && app_icon && *app_icon)
+		*out_icon = g_strdup(app_icon);
+	if (!*out_icon)
+		*out_icon = g_strdup("application-x-executable");
+}
+
 static gchar *
 format_age(gint64 ts)
 {
@@ -382,6 +537,7 @@ make_bubble(Notification *n)
 	sender = gtk_label_new(n->sender);
 	gtk_widget_set_name(sender, "NotifSender");
 	gtk_widget_set_halign(sender, GTK_ALIGN_START);
+	gtk_label_set_ellipsize(GTK_LABEL(sender), PANGO_ELLIPSIZE_END);
 	age = format_age(n->timestamp);
 	when = gtk_label_new(age);
 	gtk_widget_set_name(when, "NotifTime");
@@ -392,7 +548,9 @@ make_bubble(Notification *n)
 	gtk_widget_set_name(body, "NotifContent");
 	gtk_widget_set_halign(body, GTK_ALIGN_START);
 	gtk_label_set_line_wrap(GTK_LABEL(body), TRUE);
-	gtk_label_set_max_width_chars(GTK_LABEL(body), 40);
+	gtk_label_set_line_wrap_mode(GTK_LABEL(body), PANGO_WRAP_WORD_CHAR);
+	gtk_label_set_ellipsize(GTK_LABEL(body), PANGO_ELLIPSIZE_END);
+	gtk_label_set_max_width_chars(GTK_LABEL(body), 28);
 	gtk_box_pack_start(GTK_BOX(bubble), header, FALSE, FALSE, 0);
 	gtk_box_pack_start(GTK_BOX(bubble), body, FALSE, FALSE, 0);
 	return bubble;
@@ -452,6 +610,8 @@ make_card(AppGroup *g)
 	name = gtk_label_new(g->app_name);
 	gtk_widget_set_name(name, "NotifAppName");
 	gtk_widget_set_halign(name, GTK_ALIGN_START);
+	gtk_label_set_ellipsize(GTK_LABEL(name), PANGO_ELLIPSIZE_END);
+	gtk_label_set_max_width_chars(GTK_LABEL(name), 22);
 	if (g->unread_count > 0)
 		stxt = g_strdup_printf("%d new", g->unread_count);
 	else if (g->has_tray_item)
@@ -544,11 +704,13 @@ create_notif_window(void)
 	win = gtk_window_new(GTK_WINDOW_POPUP);
 	panel_ensure_rgba(win);
 	gtk_window_set_decorated(GTK_WINDOW(win), FALSE);
+	gtk_window_set_resizable(GTK_WINDOW(win), FALSE);
 	gtk_window_set_skip_taskbar_hint(GTK_WINDOW(win), TRUE);
 	gtk_window_set_keep_above(GTK_WINDOW(win), TRUE);
 
 	outer = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
 	gtk_widget_set_name(outer, "NotifOuter");
+	gtk_widget_set_hexpand(outer, FALSE);
 	gtk_container_add(GTK_CONTAINER(win), outer);
 
 	header = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
@@ -864,8 +1026,22 @@ toggle_panel(GtkWidget *btn, gpointer u)
 	(void)btn;
 	(void)u;
 	if (gtk_widget_get_visible(g_st->panel_window)) {
-		gtk_widget_hide(g_st->panel_window);
-		gtk_widget_hide(g_st->notif_window);
+		int cx, cy, nx, ny, floor;
+
+		if (!panel_primary_geo(&geo)) {
+			gtk_widget_hide(g_st->panel_window);
+			gtk_widget_hide(g_st->notif_window);
+			return;
+		}
+		floor = geo.y + geo.height;
+		gtk_window_get_position(GTK_WINDOW(g_st->panel_window), &cx, &cy);
+		anim_window_slide(g_st->panel_window, g_st->panel_window,
+		                  cx, cy, floor, ANIM_SLIDE_MS, TRUE);
+		if (gtk_widget_get_visible(g_st->notif_window)) {
+			gtk_window_get_position(GTK_WINDOW(g_st->notif_window), &nx, &ny);
+			anim_window_slide(g_st->notif_window, g_st->notif_window,
+			                  nx, ny, floor, ANIM_SLIDE_MS, TRUE);
+		}
 		return;
 	}
 	if (!panel_primary_geo(&geo))
@@ -875,10 +1051,17 @@ toggle_panel(GtkWidget *btn, gpointer u)
 	gtk_widget_show_all(g_st->panel_window);
 	while (gtk_events_pending())
 		gtk_main_iteration();
-	gtk_window_get_size(GTK_WINDOW(g_st->panel_window), &pw, &ph);
+	{
+		GtkWidget *card = gtk_bin_get_child(GTK_BIN(g_st->panel_window));
+
+		pw = gtk_widget_get_allocated_width(g_st->panel_window);
+		ph = card ? gtk_widget_get_allocated_height(card)
+		          : gtk_widget_get_allocated_height(g_st->panel_window);
+	}
 	px = geo.x + geo.width - pw - PANEL_MARGIN;
 	py = geo.y + geo.height - PANEL_HEIGHT - MENU_GAP - ph;
-	gtk_window_move(GTK_WINDOW(g_st->panel_window), px, py);
+	anim_window_slide(g_st->panel_window, g_st->panel_window,
+	                  px, geo.y + geo.height, py, ANIM_SLIDE_MS, FALSE);
 
 	rebuild_notif();
 	gtk_widget_set_size_request(g_st->notif_window, pw, -1);
@@ -888,6 +1071,7 @@ toggle_panel(GtkWidget *btn, gpointer u)
 		gtk_main_iteration();
 	{
 		GtkRequisition nat;
+		int ny;
 
 		gtk_widget_get_preferred_size(g_st->notif_window, NULL, &nat);
 		avail = py - geo.y - NOTIF_PANEL_GAP;
@@ -896,7 +1080,9 @@ toggle_panel(GtkWidget *btn, gpointer u)
 			nh = 1;
 		gtk_widget_set_size_request(g_st->notif_window, pw, nh);
 		gtk_window_resize(GTK_WINDOW(g_st->notif_window), pw, nh);
-		gtk_window_move(GTK_WINDOW(g_st->notif_window), px, py - NOTIF_PANEL_GAP - nh);
+		ny = py - NOTIF_PANEL_GAP - nh;
+		anim_window_slide(g_st->notif_window, g_st->notif_window,
+		                  px, geo.y + geo.height, ny, ANIM_SLIDE_MS, FALSE);
 	}
 }
 
@@ -963,6 +1149,7 @@ on_sni_props(GObject *src, GAsyncResult *res, gpointer user)
 	GError *err = NULL;
 	GVariant *ret, *dict, *v;
 	gchar *item_id = NULL, *icon_name = NULL, *menu_path = NULL, *title = NULL;
+	gchar *desktop_entry = NULL, *resolved = NULL;
 	GdkPixbuf *pix = NULL;
 	AppGroup *g;
 
@@ -992,15 +1179,41 @@ on_sni_props(GObject *src, GAsyncResult *res, gpointer user)
 		menu_path = g_variant_dup_string(v, NULL);
 		g_variant_unref(v);
 	}
+	if ((v = g_variant_lookup_value(dict, "DesktopEntry", G_VARIANT_TYPE_STRING))) {
+		desktop_entry = g_variant_dup_string(v, NULL);
+		g_variant_unref(v);
+	}
 	if ((!icon_name || !*icon_name) &&
 	    (v = g_variant_lookup_value(dict, "IconPixmap", G_VARIANT_TYPE("a(iiay)")))) {
 		pix = parse_icon_pixmap(v);
 		g_variant_unref(v);
 	}
 
-	g = find_or_create_group(item_id ? item_id : p->bus,
-	                         title ? title : (item_id ? item_id : "Tray"),
+	resolved = name_from_bus(p->bus);
+	if (!resolved && desktop_entry) {
+		GDesktopAppInfo *dai = desktop_for_token(desktop_entry);
+
+		if (dai) {
+			resolved = g_strdup(g_app_info_get_display_name(G_APP_INFO(dai)));
+			g_object_unref(dai);
+		}
+	}
+	if (!resolved && item_id) {
+		GDesktopAppInfo *dai = desktop_for_token(item_id);
+
+		if (dai) {
+			resolved = g_strdup(g_app_info_get_display_name(G_APP_INFO(dai)));
+			g_object_unref(dai);
+		}
+	}
+	if (!resolved)
+		resolved = g_strdup(title && *title ? title
+		                    : (item_id && *item_id ? item_id : "Tray"));
+
+	g = find_or_create_group(item_id ? item_id : p->bus, resolved,
 	                         (icon_name && *icon_name) ? icon_name : "application-x-executable");
+	g_free(g->app_name);
+	g->app_name = g_strdup(resolved);
 	g->has_tray_item = TRUE;
 	if (pix) {
 		if (g->icon_pixbuf)
@@ -1018,6 +1231,8 @@ on_sni_props(GObject *src, GAsyncResult *res, gpointer user)
 	g_free(item_id);
 	g_free(icon_name);
 	g_free(title);
+	g_free(desktop_entry);
+	g_free(resolved);
 	g_variant_unref(dict);
 	g_variant_unref(ret);
 	g_free(p->bus);
@@ -1131,24 +1346,56 @@ notif_method(GDBusConnection *c, const gchar *sender, const gchar *path,
 		guint32 id;
 		AppGroup *g;
 		Notification *n;
-		const gchar *icon;
+		gchar *desktop_hint = NULL, *disp_name = NULL, *disp_icon = NULL;
+		GList *l;
 
 		g_variant_get(params, "(&su&s&s&s@as@a{sv}i)",
 		              &app_name, &replaces, &app_icon, &summary, &body,
 		              &actions, &hints, &expire);
-		id = replaces ? replaces : g_st->next_id++;
-		icon = (app_icon && *app_icon) ? app_icon : "application-x-executable";
-		g = find_or_create_group(app_name, app_name, icon);
-		n = g_new0(Notification, 1);
-		n->id = id;
-		n->app_name = g_strdup(app_name);
-		n->summary = g_strdup(summary);
-		n->body = g_strdup(body);
-		n->sender = g_strdup(app_name);
-		n->timestamp = time(NULL);
-		g->notifications = g_list_append(g->notifications, n);
-		g->unread_count++;
+		if (hints) {
+			GVariant *de = g_variant_lookup_value(hints, "desktop-entry", G_VARIANT_TYPE_STRING);
+
+			if (de) {
+				desktop_hint = g_variant_dup_string(de, NULL);
+				g_variant_unref(de);
+			}
+		}
+		resolve_notify_identity(app_name, desktop_hint, app_icon, &disp_name, &disp_icon);
+		g = find_or_create_group(desktop_hint ? desktop_hint : app_name, disp_name, disp_icon);
+		g_free(g->app_name);
+		g->app_name = g_strdup(disp_name);
+		id = 0;
+		if (replaces) {
+			for (l = g->notifications; l; l = l->next) {
+				Notification *old = l->data;
+
+				if (old->id == replaces) {
+					g_free(old->summary);
+					g_free(old->body);
+					old->summary = g_strdup(summary);
+					old->body = g_strdup(body);
+					old->timestamp = time(NULL);
+					id = replaces;
+					break;
+				}
+			}
+		}
+		if (!id) {
+			id = g_st->next_id++;
+			n = g_new0(Notification, 1);
+			n->id = id;
+			n->app_name = g_strdup(disp_name);
+			n->summary = g_strdup(summary);
+			n->body = g_strdup(body);
+			n->sender = g_strdup(disp_name);
+			n->timestamp = time(NULL);
+			g->notifications = g_list_append(g->notifications, n);
+			g->unread_count++;
+		}
 		rebuild_notif();
+		g_free(desktop_hint);
+		g_free(disp_name);
+		g_free(disp_icon);
 		if (actions)
 			g_variant_unref(actions);
 		if (hints)
@@ -1157,6 +1404,34 @@ notif_method(GDBusConnection *c, const gchar *sender, const gchar *path,
 		return;
 	}
 	if (g_strcmp0(method, "CloseNotification") == 0) {
+		guint32 id = 0;
+		GList *gl;
+
+		g_variant_get(params, "(u)", &id);
+		for (gl = g_st->groups; gl; gl = gl->next) {
+			AppGroup *g = gl->data;
+			GList *nl;
+
+			for (nl = g->notifications; nl; nl = nl->next) {
+				Notification *n = nl->data;
+
+				if (n->id != id)
+					continue;
+				g->notifications = g_list_remove(g->notifications, n);
+				if (g->unread_count > 0)
+					g->unread_count--;
+				free_notification(n);
+				rebuild_notif();
+				if (g_st->notif_conn)
+					g_dbus_connection_emit_signal(g_st->notif_conn, NULL,
+						"/org/freedesktop/Notifications",
+						"org.freedesktop.Notifications",
+						"NotificationClosed",
+						g_variant_new("(uu)", id, 3u), NULL);
+				goto closed;
+			}
+		}
+closed:
 		g_dbus_method_invocation_return_value(inv, NULL);
 		return;
 	}
@@ -1220,10 +1495,10 @@ own_buses(void)
 	gchar *host;
 
 	g_bus_own_name(G_BUS_TYPE_SESSION, "org.freedesktop.Notifications",
-	               G_BUS_NAME_OWNER_FLAGS_NONE,
+	               G_BUS_NAME_OWNER_FLAGS_REPLACE | G_BUS_NAME_OWNER_FLAGS_ALLOW_REPLACEMENT,
 	               on_notif_acquired, NULL, NULL, NULL, NULL);
 	g_bus_own_name(G_BUS_TYPE_SESSION, "org.kde.StatusNotifierWatcher",
-	               G_BUS_NAME_OWNER_FLAGS_NONE,
+	               G_BUS_NAME_OWNER_FLAGS_REPLACE | G_BUS_NAME_OWNER_FLAGS_ALLOW_REPLACEMENT,
 	               on_watcher_acquired, NULL, NULL, NULL, NULL);
 	host = g_strdup_printf("org.kde.StatusNotifierHost-%d", (int)getpid());
 	g_bus_own_name(G_BUS_TYPE_SESSION, host, G_BUS_NAME_OWNER_FLAGS_NONE,
