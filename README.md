@@ -257,7 +257,9 @@ The outdated implementation doesn't have to.
 
 ## Status
 
-NuMATE is currently under active development. I have been working on the project for nearly a year now and hope to have a release ready soon. Thank you very much for your interest.
+NuMATE is currently under active development. It is functional and is now available for installation to Debian based distros. (Tested on Devuan Excalibur)
+
+There are some minor issues such as desktop systems not displaying any internet connection status. Those issues are being prioritized.
 
 The project is being built incrementally, with the desktop shell, settings, and supporting components being modernised and consolidated into a coherent desktop environment.
 
