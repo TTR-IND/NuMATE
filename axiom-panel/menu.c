@@ -21,6 +21,9 @@ typedef struct {
 	GPtrArray *apps;
 } MenuData;
 
+static MenuData *g_menu;
+static gboolean g_menu_open;
+
 static AppInfo *
 app_info_new(GDesktopAppInfo *desktop_app)
 {
@@ -149,14 +152,36 @@ on_search_changed(GtkSearchEntry *entry, MenuData *menu)
 static void
 menu_hide(MenuData *menu)
 {
+	if (!menu || !menu->window)
+		return;
 	gtk_entry_set_text(GTK_ENTRY(menu->search_entry), "");
 	if (menu->app_list)
 		gtk_list_box_unselect_all(GTK_LIST_BOX(menu->app_list));
 	if (menu->search_list)
 		gtk_list_box_unselect_all(GTK_LIST_BOX(menu->search_list));
-	if (!gtk_widget_get_visible(menu->window))
-		return;
-	anim_window_fade(menu->window, menu, 1.0, 0.0, ANIM_FADE_MS, TRUE);
+	g_menu_open = FALSE;
+	anim_cancel(menu);
+	gtk_widget_hide(menu->window);
+	gtk_widget_set_opacity(menu->window, 1.0);
+}
+
+void
+menu_dismiss(void)
+{
+	if (g_menu)
+		menu_hide(g_menu);
+}
+
+gboolean
+menu_is_open(void)
+{
+	return g_menu_open && g_menu && gtk_widget_get_visible(g_menu->window);
+}
+
+GtkWidget *
+menu_popup_window(void)
+{
+	return g_menu ? g_menu->window : NULL;
 }
 
 static gboolean
@@ -222,6 +247,7 @@ menu_show(MenuData *menu)
 	if (!panel_primary_geo(&geo))
 		return;
 
+	panel_hold_dismiss(500);
 	gtk_window_move(GTK_WINDOW(menu->window), -10000, -10000);
 	gtk_widget_set_opacity(menu->window, 0.0);
 	gtk_widget_show_all(menu->window);
@@ -232,6 +258,7 @@ menu_show(MenuData *menu)
 	x = geo.x + 4;
 	y = geo.y + geo.height - PANEL_HEIGHT - MENU_GAP - alloc.height;
 	gtk_window_move(GTK_WINDOW(menu->window), x, y);
+	g_menu_open = TRUE;
 	anim_window_fade(menu->window, menu, 0.0, 1.0, ANIM_FADE_MS, FALSE);
 	gtk_widget_grab_focus(menu->search_entry);
 }
@@ -240,10 +267,19 @@ static void
 menu_toggle(GtkButton *btn, MenuData *menu)
 {
 	(void)btn;
-	if (gtk_widget_get_visible(menu->window))
+	if (g_menu_open || gtk_widget_get_visible(menu->window))
 		menu_hide(menu);
-	else
+	else {
+		status_dismiss();
 		menu_show(menu);
+	}
+}
+
+void
+menu_toggle_apps(void)
+{
+	if (g_menu)
+		menu_toggle(NULL, g_menu);
 }
 
 static MenuData *
@@ -325,12 +361,17 @@ menu_section_new(GtkWidget *panel)
 	GtkWidget *btn, *icon;
 
 	menu = menu_create(panel);
-	icon = gtk_image_new_from_icon_name("process-working-symbolic", GTK_ICON_SIZE_LARGE_TOOLBAR);
+	g_menu = menu;
+	icon = gtk_image_new_from_icon_name("start-here-symbolic", GTK_ICON_SIZE_LARGE_TOOLBAR);
+	if (!gtk_icon_theme_has_icon(gtk_icon_theme_get_default(), "start-here-symbolic"))
+		gtk_image_set_from_icon_name(GTK_IMAGE(icon), "distributor-logo", GTK_ICON_SIZE_LARGE_TOOLBAR);
 	gtk_image_set_pixel_size(GTK_IMAGE(icon), 32);
 	btn = gtk_button_new();
+	gtk_widget_set_tooltip_text(btn, "Applications");
 	gtk_container_add(GTK_CONTAINER(btn), icon);
 	gtk_style_context_add_class(gtk_widget_get_style_context(btn), "launcher-btn");
 	gtk_button_set_relief(GTK_BUTTON(btn), GTK_RELIEF_NONE);
+	gtk_widget_set_can_focus(btn, TRUE);
 	g_signal_connect(btn, "clicked", G_CALLBACK(menu_toggle), menu);
 	g_object_set_data(G_OBJECT(btn), "menu", menu);
 	return btn;

@@ -49,6 +49,19 @@ GtkWidget *menu_section_new(GtkWidget *panel);
 GtkWidget *windows_section_new(GtkWidget *panel);
 GtkWidget *status_section_new(GtkWidget *panel);
 
+/* Overlay popups. Dismiss is immediate — click-away must not wait on a fade. */
+void       menu_dismiss(void);
+void       menu_toggle_apps(void);
+gboolean   menu_is_open(void);
+GtkWidget *menu_popup_window(void);
+
+void       status_dismiss(void);
+gboolean   status_is_open(void);
+void       status_overlay_windows(GtkWidget **panel_win, GtkWidget **notif_win);
+
+void       panel_dismiss_overlays(void);
+void       panel_hold_dismiss(int ms);
+
 gboolean   dock_is_pinned(const char *desktop_id);
 void       dock_pin(const char *desktop_id);
 void       dock_unpin(const char *desktop_id);

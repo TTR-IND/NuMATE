@@ -755,24 +755,26 @@ else
     else
         run sudo install -d /usr/share/themes /usr/share/icons
 
-        # GTK theme and window-border theme are separate top-level
-        # directories, per Fluent's own layout.
-        for _variant in "$GTK_THEME" "$WM_THEME"; do
-            if [ -d "$_theme_src/gtk-themes/$_variant" ]; then
+        # Every vendored GTK/WM variant. Dark is the session default;
+        # Light must be on disk for the Interface switch.
+        if [ -d "$_theme_src/gtk-themes" ]; then
+            for _dir in "$_theme_src/gtk-themes"/*; do
+                [ -d "$_dir" ] || continue
+                _variant=$(basename -- "$_dir")
                 run sudo rm -rf "/usr/share/themes/$_variant"
-                run sudo cp -rL "$_theme_src/gtk-themes/$_variant" /usr/share/themes/
+                run sudo cp -rL "$_dir" /usr/share/themes/
                 ok "$_variant → /usr/share/themes/"
-            else
-                warn "$_variant missing from theme/gtk-themes/ — skipped"
-            fi
-        done
+            done
+        fi
 
-        if [ -d "$_theme_src/cursors/$CURSOR_THEME" ]; then
-            run sudo rm -rf "/usr/share/icons/$CURSOR_THEME"
-            run sudo cp -rL "$_theme_src/cursors/$CURSOR_THEME" /usr/share/icons/
-            ok "$CURSOR_THEME → /usr/share/icons/"
-        else
-            warn "$CURSOR_THEME missing from theme/cursors/ — skipped"
+        if [ -d "$_theme_src/cursors" ]; then
+            for _dir in "$_theme_src/cursors"/*; do
+                [ -d "$_dir" ] || continue
+                _variant=$(basename -- "$_dir")
+                run sudo rm -rf "/usr/share/icons/$_variant"
+                run sudo cp -rL "$_dir" /usr/share/icons/
+                ok "$_variant → /usr/share/icons/"
+            done
         fi
     fi
 
@@ -1155,33 +1157,22 @@ NEMO_MASK
         ok "cleared saved-session entries that launch windowed Nemo"
     fi
 
-    # ── Picom replaces Marco's compositor ─────────────────────────────────
-    # Marco and picom cannot compose the same display. compositing-manager
-    # must be off before picom starts. Window hide/show motion lives in
-    # picom.conf; shell chrome motion lives in axiom-panel.
-    apt_install "compositor" picom \
-        && ok "picom installed" \
-        || warn "picom is not in this suite — window animations will be absent"
-
-    run sudo install -d /usr/share/numate /etc/xdg/autostart /usr/local/bin
-    if [ -f "$SCRIPT_DIR/picom/picom.conf" ]; then
-        run sudo install -Dm644 "$SCRIPT_DIR/picom/picom.conf" /usr/share/numate/picom.conf
-        run sudo install -Dm644 "$SCRIPT_DIR/picom/picom-safe.conf" /usr/share/numate/picom-safe.conf
-        run sudo install -Dm644 "$SCRIPT_DIR/picom/picom.desktop" /etc/xdg/autostart/numate-picom.desktop
-        run sudo install -Dm755 "$SCRIPT_DIR/bin/numate-compositor" /usr/local/bin/numate-compositor
-        ok "picom config → /usr/share/numate/picom.conf"
-        ok "picom autostart → /etc/xdg/autostart/numate-picom.desktop"
-    fi
-
-    if [ "$OPT_DRY_RUN" -eq 0 ] && [ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
-        gsettings set org.mate.Marco.general compositing-manager false 2>/dev/null \
-            && ok "Marco compositor off" \
-            || true
-        if command -v picom >/dev/null 2>&1 && [ -x /usr/local/bin/numate-compositor ]; then
-            /usr/local/bin/numate-compositor >/dev/null 2>&1 || true
-            ok "picom started for this session"
+    # Earlier builds started a second compositor and turned Marco's off.
+    # Two compositors on one display tear and lag. Marco owns composition
+    # again — delete the leftover files so they cannot start at login.
+    run sudo rm -f /etc/xdg/autostart/numate-picom.desktop \
+                   "$HOME/.config/autostart/numate-picom.desktop" \
+                   /usr/local/bin/numate-compositor \
+                   /usr/share/numate/picom.conf \
+                   /usr/share/numate/picom-safe.conf
+    if [ "$OPT_DRY_RUN" -eq 0 ]; then
+        pkill -u "$(id -un)" -x picom 2>/dev/null || true
+        pkill -u "$(id -un)" -x compton 2>/dev/null || true
+        if [ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
+            gsettings set org.mate.Marco.general compositing-manager true 2>/dev/null || true
         fi
     fi
+    ok "Marco compositor restored"
 fi
 }
 
@@ -1210,8 +1201,7 @@ document-font-name='$DOC_FONT'
 
 [org/mate/Marco/general]
 theme='$WM_THEME'
-# Picom owns composition. Two compositors on one display tear and lag.
-compositing-manager=false
+compositing-manager=true
 
 [org/mate/session/required-components]
 # Keep the component id as mate-panel. Stage 2 purged the mate-panel
@@ -1316,7 +1306,7 @@ if [ "$OPT_DRY_RUN" -eq 0 ] && [ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
     gsettings set org.mate.interface font-name "$UI_FONT"
     gsettings set org.mate.interface document-font-name "$DOC_FONT"
     gsettings set org.mate.Marco.general theme "$WM_THEME"
-    gsettings set org.mate.Marco.general compositing-manager false
+    gsettings set org.mate.Marco.general compositing-manager true
     gsettings set org.mate.peripherals-mouse cursor-theme "$CURSOR_THEME"
     gsettings set org.mate.sound theme-name "$ICON_THEME"
     gsettings set org.mate.sound event-sounds true

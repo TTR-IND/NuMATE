@@ -145,6 +145,9 @@ if command -v gsettings >/dev/null 2>&1; then
 	# resolves through our shadowed desktop. Pointing it at axiom-panel
 	# is the belt; the desktop shadow is the braces.
 	gsettings set org.mate.session.required-components panel mate-panel 2>/dev/null || true
+	# marco's overlay-key eats Super_L. Clear it so axiom-panel can
+	# toggle the apps menu the way the Windows key is supposed to.
+	gsettings set org.mate.marco.general overlay-key '' 2>/dev/null || true
 fi
 
 # Drop the running stock panel and take the strut.

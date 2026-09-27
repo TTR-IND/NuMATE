@@ -1,0 +1,10 @@
+bin/numate-set-wallpaper usr/bin/
+backgrounds/numate-wall.png usr/share/backgrounds/numate/
+nemo/*.nemo_action usr/share/nemo/actions/
+nemo/gtk.css usr/share/numate/nemo/
+nemo/nemo-desktop.desktop usr/share/applications/
+debian/axiom-panel.desktop usr/share/applications/
+debian/mate-panel.desktop usr/share/applications/
+debian/mate-panel.desktop etc/xdg/autostart/
+theme/gtk-themes usr/share/themes/
+theme/cursors usr/share/icons/

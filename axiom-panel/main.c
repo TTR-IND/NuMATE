@@ -1,14 +1,175 @@
 #include "panel.h"
 
+#include <gio/gio.h>
+#include <string.h>
+
 #include <gdk/gdkx.h>
 #include <X11/Xatom.h>
 #include <X11/Xlib.h>
+#include <X11/keysym.h>
 
+static GtkWidget *g_panel_window;
 static GtkWidget *g_shelf;
+
+void
+panel_dismiss_overlays(void)
+{
+	menu_dismiss();
+	status_dismiss();
+}
+
+static gint64 g_hold_dismiss_until;
+
+void
+panel_hold_dismiss(int ms)
+{
+	gint64 now = g_get_monotonic_time();
+
+	if (ms < 0)
+		ms = 0;
+	g_hold_dismiss_until = now + (gint64)ms * 1000;
+}
+
+static gboolean
+dismiss_held(void)
+{
+	return g_get_monotonic_time() < g_hold_dismiss_until;
+}
+
+static Window
+widget_xid(GtkWidget *w)
+{
+	GdkWindow *gw;
+
+	if (!w || !gtk_widget_get_realized(w))
+		return None;
+	gw = gtk_widget_get_window(w);
+	return gw ? GDK_WINDOW_XID(gw) : None;
+}
+
+static gboolean
+xid_is_ours(Window xid)
+{
+	GtkWidget *menu_w, *sw, *nw;
+
+	if (!xid)
+		return FALSE;
+	if (xid == widget_xid(g_panel_window))
+		return TRUE;
+	menu_w = menu_popup_window();
+	if (xid == widget_xid(menu_w))
+		return TRUE;
+	status_overlay_windows(&sw, &nw);
+	if (xid == widget_xid(sw) || xid == widget_xid(nw))
+		return TRUE;
+	return FALSE;
+}
+
+static Window
+read_active_window(Display *dpy)
+{
+	Atom net_active, type = None;
+	int fmt = 0;
+	unsigned long n = 0, extra = 0;
+	unsigned char *data = NULL;
+	Window w = None;
+
+	net_active = XInternAtom(dpy, "_NET_ACTIVE_WINDOW", False);
+	if (XGetWindowProperty(dpy, DefaultRootWindow(dpy), net_active,
+	                       0, 1, False, XA_WINDOW,
+	                       &type, &fmt, &n, &extra, &data) == Success && data && n)
+		w = *(Window *)data;
+	if (data)
+		XFree(data);
+	return w;
+}
+
+static GdkFilterReturn
+root_filter(GdkXEvent *gxev, GdkEvent *gev, gpointer data)
+{
+	XEvent *ev = (XEvent *)gxev;
+	Display *dpy;
+
+	(void)gev;
+	(void)data;
+	dpy = GDK_DISPLAY_XDISPLAY(gdk_display_get_default());
+
+	/* KeyRelease so auto-repeat on Super does not flutter the menu. */
+	if (ev->type == KeyRelease) {
+		KeySym sym = XLookupKeysym(&ev->xkey, 0);
+
+		if (sym == XK_Super_L || sym == XK_Super_R ||
+		    sym == XK_Meta_L || sym == XK_Meta_R) {
+			menu_toggle_apps();
+			return GDK_FILTER_REMOVE;
+		}
+	}
+	if (ev->type == PropertyNotify) {
+		Atom net_active = XInternAtom(dpy, "_NET_ACTIVE_WINDOW", False);
+
+		if (ev->xproperty.atom == net_active) {
+			Window aw;
+
+			if (dismiss_held())
+				return GDK_FILTER_CONTINUE;
+			aw = read_active_window(dpy);
+			if (aw && !xid_is_ours(aw))
+				panel_dismiss_overlays();
+		}
+	}
+	return GDK_FILTER_CONTINUE;
+}
+
+static int
+x_ignore_badaccess(Display *dpy, XErrorEvent *err)
+{
+	(void)dpy;
+	if (err->error_code == BadAccess)
+		return 0;
+	return 0;
+}
+
+static void
+install_dismiss_watch(void)
+{
+	Display *dpy;
+	Window root;
+	XWindowAttributes wa;
+	int (*prev)(Display *, XErrorEvent *);
+
+	dpy = GDK_DISPLAY_XDISPLAY(gdk_display_get_default());
+	root = DefaultRootWindow(dpy);
+	if (XGetWindowAttributes(dpy, root, &wa))
+		XSelectInput(dpy, root, wa.your_event_mask | PropertyChangeMask);
+
+	prev = XSetErrorHandler(x_ignore_badaccess);
+	{
+		KeyCode l = XKeysymToKeycode(dpy, XK_Super_L);
+		KeyCode r = XKeysymToKeycode(dpy, XK_Super_R);
+		unsigned int mods[] = { 0, Mod2Mask, LockMask, Mod2Mask | LockMask };
+		unsigned int i;
+
+		for (i = 0; i < 4; i++) {
+			if (l)
+				XGrabKey(dpy, (int)l, mods[i], root, True, GrabModeAsync, GrabModeAsync);
+			if (r)
+				XGrabKey(dpy, (int)r, mods[i], root, True, GrabModeAsync, GrabModeAsync);
+		}
+	}
+	XSync(dpy, False);
+	XSetErrorHandler(prev);
+
+	/* Global filter: a foreign-root GdkWindow does not see grabbed keys. */
+	gdk_window_add_filter(NULL, root_filter, NULL);
+}
+
 static GtkCssProvider *g_shelf_css;
 static int g_shelf_radius = 16;
 static int g_shelf_from = 16;
 static int g_shelf_to = 16;
+static GtkCssProvider *g_appearance_css;
+static GSettings *g_iface_settings;
+static gboolean g_panel_light;
 
 static const char css[] =
 	"window.axiom-panel { background: transparent; }"
@@ -146,10 +307,116 @@ static const char css[] =
 	"  color: #ffffff; background: rgba(181,52,42,0.7); border-radius: 10px;"
 	"}";
 
+
+static const char light_css[] =
+	"window.axiom-panel { background: transparent; }"
+	".shelf {"
+	"  background: rgba(255,255,255,0.78);"
+	"}"
+	".card, #GonzoMenu {"
+	"  background-color: rgba(255,255,255,0.86);"
+	"  border: 1px solid rgba(0,0,0,0.08);"
+	"  background-image: none;"
+	"}"
+	".running-indicator { background: #3c4043; }"
+	".status-pill {"
+	"  background: rgba(255,255,255,0.55);"
+	"  border: 1px solid rgba(0,0,0,0.06);"
+	"}"
+	".status-pill:hover { background: rgba(255,255,255,0.78); }"
+	"label { color: #3c4043; }"
+	"scale trough { background: rgba(0,0,0,0.14); }"
+	"scale contents { background: rgba(0,0,0,0.08); }"
+	"scale slider { background: #ffffff; box-shadow: 0 2px 8px rgba(0,0,0,0.18); }"
+	"#PanelCard, #NotifOuter, #DockPreview {"
+	"  background-color: rgba(255,255,255,0.88);"
+	"  border: 1px solid rgba(255,255,255,0.7);"
+	"}"
+	".tile {"
+	"  background: rgba(255,255,255,0.72);"
+	"  color: #3c4043;"
+	"  box-shadow: 0 1px 3px rgba(0,0,0,0.08);"
+	"}"
+	".tile:active { background: rgba(255,255,255,0.95); }"
+	".tile.active { background: #B5342A; color: white; }"
+	".tile.active label { color: white; }"
+	".tile label { color: #3c4043; }"
+	".action-btn, .power-btn {"
+	"  background: rgba(255,255,255,0.7); color: #3c4043;"
+	"}"
+	"#GonzoMenuSearch {"
+	"  background-color: rgba(255,255,255,0.7);"
+	"  color: #3c4043;"
+	"}"
+	"#GonzoMenuSearch entry { color: #3c4043; }"
+	"#GonzoMenuAppList row:hover { background-color: rgba(0,0,0,0.05); }"
+	"#GonzoMenuAppList row:selected { background-color: rgba(0,0,0,0.08); }"
+	"#GonzoMenu scrollbar slider { background: rgba(0,0,0,0.22); }"
+	"#NotifTitle, #NotifAppName, #NotifSender { color: #202124; }"
+	"#NotifAppStatus, #NotifTime { color: #5f6368; }"
+	"#NotifContent { color: #3c4043; }"
+	"#NotifCard {"
+	"  background: rgba(255,255,255,0.55);"
+	"  border: 1px solid rgba(0,0,0,0.05);"
+	"}"
+	"#NotifBubble { background: rgba(255,255,255,0.65); }"
+	".thumb-card {"
+	"  background: rgba(255,255,255,0.7);"
+	"  border: 1px solid rgba(0,0,0,0.06);"
+	"}"
+	".thumb-title { color: #202124; }"
+	".thumb-close { color: #5f6368; }"
+	".thumb-shot { background: rgba(0,0,0,0.08); }";
+
+
+static gboolean
+gtk_theme_is_light(void)
+{
+	gchar *name;
+	gboolean light = FALSE;
+
+	if (!g_iface_settings)
+		return FALSE;
+	name = g_settings_get_string(g_iface_settings, "gtk-theme");
+	if (name && strstr(name, "Light"))
+		light = TRUE;
+	g_free(name);
+	return light;
+}
+
+static void
+panel_apply_appearance(gboolean light)
+{
+	if (!g_appearance_css) {
+		g_appearance_css = gtk_css_provider_new();
+		gtk_style_context_add_provider_for_screen(
+			gdk_screen_get_default(),
+			GTK_STYLE_PROVIDER(g_appearance_css),
+			GTK_STYLE_PROVIDER_PRIORITY_USER);
+	}
+	g_panel_light = light;
+	g_object_set(gtk_settings_get_default(),
+	             "gtk-application-prefer-dark-theme", !light,
+	             NULL);
+	gtk_css_provider_load_from_data(g_appearance_css,
+	                                light ? light_css : "", -1, NULL);
+}
+
+static void
+on_gtk_theme_changed(GSettings *s, gchar *key, gpointer u)
+{
+	(void)s;
+	(void)key;
+	(void)u;
+	panel_apply_appearance(gtk_theme_is_light());
+}
+
 void
 panel_apply_css(void)
 {
 	GtkCssProvider *provider;
+	const char *schemas[] = { "org.mate.interface", "org.gnome.desktop.interface", NULL };
+	int i;
 
 	provider = gtk_css_provider_new();
 	gtk_css_provider_load_from_data(provider, css, -1, NULL);
@@ -158,6 +425,24 @@ panel_apply_css(void)
 		GTK_STYLE_PROVIDER(provider),
 		GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
 	g_object_unref(provider);
+
+	for (i = 0; schemas[i]; i++) {
+		GSettingsSchemaSource *src = g_settings_schema_source_get_default();
+		GSettingsSchema *sch = g_settings_schema_source_lookup(src, schemas[i], TRUE);
+
+		if (!sch)
+			continue;
+		if (g_settings_schema_has_key(sch, "gtk-theme")) {
+			g_iface_settings = g_settings_new(schemas[i]);
+			g_settings_schema_unref(sch);
+			break;
+		}
+		g_settings_schema_unref(sch);
+	}
+	if (g_iface_settings)
+		g_signal_connect(g_iface_settings, "changed::gtk-theme",
+		                 G_CALLBACK(on_gtk_theme_changed), NULL);
+	panel_apply_appearance(gtk_theme_is_light());
 }
 
 void
@@ -407,6 +692,7 @@ on_realize(GtkWidget *window, gpointer unused)
 	 * cannot start until that timeout.
 	 */
 	panel_session_register();
+	install_dismiss_watch();
 }
 
 static void
@@ -428,6 +714,7 @@ main(int argc, char **argv)
 	panel_apply_css();
 
 	window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+	g_panel_window = window;
 	panel_ensure_rgba(window);
 	gtk_widget_set_name(window, "axiom-panel");
 	gtk_style_context_add_class(gtk_widget_get_style_context(window), "axiom-panel");

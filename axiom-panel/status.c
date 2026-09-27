@@ -61,9 +61,14 @@ typedef struct {
 	guint32 next_id;
 	gboolean wifi_on;
 	gboolean bt_on;
+	gboolean ethernet_up;
+	gboolean net_online;
+	GtkWidget *net_tile_icon;
+	GtkWidget *net_tile_label;
 } Status;
 
 static Status *g_st;
+static gboolean g_status_open;
 static void on_brightness(GtkRange *r, gpointer u);
 static void refresh_battery_ui(void);
 
@@ -121,10 +126,19 @@ refresh_battery_ui(void)
 			gtk_widget_set_visible(g_st->battery_box, FALSE);
 		return;
 	}
-	v = g_dbus_proxy_get_cached_property(g_st->upower_proxy, "IsPresent");
-	present = v ? g_variant_get_boolean(v) : FALSE;
-	if (v)
+	/* DisplayDevice exists on desktops too (line power). Only a
+	 * Type=2 battery that is actually present gets an indicator. */
+	v = g_dbus_proxy_get_cached_property(g_st->upower_proxy, "Type");
+	if (v) {
+		present = (g_variant_get_uint32(v) == 2);
 		g_variant_unref(v);
+	}
+	if (present) {
+		v = g_dbus_proxy_get_cached_property(g_st->upower_proxy, "IsPresent");
+		present = v ? g_variant_get_boolean(v) : FALSE;
+		if (v)
+			g_variant_unref(v);
+	}
 	if (g_st->battery_icon)
 		gtk_widget_set_visible(g_st->battery_icon, present);
 	if (g_st->battery_box)
@@ -312,6 +326,56 @@ wifi_enabled(void)
 
 	g_free(out);
 	return on;
+}
+
+/* ethernet:connected with NM connectivity full/portal counts as a
+ * working wired link. Wi-Fi radio being enabled is not the same thing. */
+static void
+probe_network(void)
+{
+	gchar *devs, *conn;
+	gboolean eth = FALSE, wifi_up = FALSE, online = FALSE;
+
+	devs = run_cmd("nmcli -t -f TYPE,STATE device status");
+	if (devs) {
+		gchar **lines = g_strsplit(devs, "\n", -1);
+		int i;
+
+		for (i = 0; lines && lines[i]; i++) {
+			if (g_str_has_prefix(lines[i], "ethernet:connected"))
+				eth = TRUE;
+			if (g_str_has_prefix(lines[i], "wifi:connected"))
+				wifi_up = TRUE;
+		}
+		g_strfreev(lines);
+		g_free(devs);
+	}
+	conn = run_cmd("nmcli -t networking connectivity");
+	if (conn) {
+		online = (strstr(conn, "full") || strstr(conn, "portal") ||
+		          strstr(conn, "limited"));
+		g_free(conn);
+	}
+	g_st->ethernet_up = eth && online;
+	g_st->wifi_on = wifi_enabled();
+	g_st->net_online = online && (eth || wifi_up);
+}
+
+static void
+set_tile_face(GtkWidget *tile, const char *icon, const char *label)
+{
+	GtkWidget *img, *lab;
+
+	if (!tile)
+		return;
+	img = g_object_get_data(G_OBJECT(tile), "tile-icon");
+	lab = g_object_get_data(G_OBJECT(tile), "tile-label");
+	if (img) {
+		gtk_image_set_from_icon_name(GTK_IMAGE(img), icon, GTK_ICON_SIZE_DND);
+		gtk_image_set_pixel_size(GTK_IMAGE(img), 28);
+	}
+	if (lab)
+		gtk_label_set_text(GTK_LABEL(lab), label);
 }
 
 static gboolean
@@ -807,6 +871,8 @@ make_tile(const char *icon, const char *label, GCallback cb)
 	gtk_box_pack_start(GTK_BOX(box), img, FALSE, FALSE, 0);
 	gtk_box_pack_start(GTK_BOX(box), lab, FALSE, FALSE, 0);
 	gtk_container_add(GTK_CONTAINER(tile), box);
+	g_object_set_data(G_OBJECT(tile), "tile-icon", img);
+	g_object_set_data(G_OBJECT(tile), "tile-label", lab);
 	g_signal_connect(tile, "clicked", cb, NULL);
 	return tile;
 }
@@ -860,12 +926,21 @@ refresh_pill(void)
 	if (g_st->clock_label)
 		gtk_label_set_text(GTK_LABEL(g_st->clock_label), buf);
 
-	g_st->wifi_on = wifi_enabled();
-	if (g_st->wifi_icon)
-		gtk_image_set_from_icon_name(GTK_IMAGE(g_st->wifi_icon),
-			g_st->wifi_on ? "network-wireless-signal-excellent-symbolic"
-			              : "network-wireless-offline-symbolic",
-			GTK_ICON_SIZE_MENU);
+	probe_network();
+	if (g_st->wifi_icon) {
+		const char *icon;
+
+		if (g_st->ethernet_up)
+			icon = "network-wired-symbolic";
+		else if (g_st->wifi_on && g_st->net_online)
+			icon = "network-wireless-signal-excellent-symbolic";
+		else if (g_st->wifi_on)
+			icon = "network-wireless-signal-none-symbolic";
+		else
+			icon = "network-wireless-offline-symbolic";
+		gtk_image_set_from_icon_name(GTK_IMAGE(g_st->wifi_icon), icon, GTK_ICON_SIZE_MENU);
+		gtk_image_set_pixel_size(GTK_IMAGE(g_st->wifi_icon), 15);
+	}
 	refresh_battery_ui();
 }
 
@@ -880,9 +955,15 @@ periodic(gpointer u)
 	if (!g_st->wifi_tile)
 		return G_SOURCE_CONTINUE;
 
-	g_st->wifi_on = wifi_enabled();
+	probe_network();
 	g_st->bt_on = bt_enabled();
-	set_tile_active(g_st->wifi_tile, g_st->wifi_on);
+	if (g_st->ethernet_up) {
+		set_tile_face(g_st->wifi_tile, "network-wired-symbolic", "Ethernet");
+		set_tile_active(g_st->wifi_tile, TRUE);
+	} else {
+		set_tile_face(g_st->wifi_tile, "network-wireless-signal-excellent-symbolic", "Wi-Fi");
+		set_tile_active(g_st->wifi_tile, g_st->wifi_on);
+	}
 	set_tile_active(g_st->bt_tile, g_st->bt_on);
 	set_tile_active(g_st->airplane_tile, !g_st->wifi_on && !g_st->bt_on);
 
@@ -1017,6 +1098,38 @@ create_settings_window(void)
 	return win;
 }
 
+void
+status_dismiss(void)
+{
+	if (!g_st)
+		return;
+	g_status_open = FALSE;
+	if (g_st->panel_window) {
+		anim_cancel(g_st->panel_window);
+		gtk_widget_hide(g_st->panel_window);
+	}
+	if (g_st->notif_window) {
+		anim_cancel(g_st->notif_window);
+		gtk_widget_hide(g_st->notif_window);
+	}
+}
+
+gboolean
+status_is_open(void)
+{
+	return g_status_open && g_st && g_st->panel_window &&
+	       gtk_widget_get_visible(g_st->panel_window);
+}
+
+void
+status_overlay_windows(GtkWidget **panel_win, GtkWidget **notif_win)
+{
+	if (panel_win)
+		*panel_win = g_st ? g_st->panel_window : NULL;
+	if (notif_win)
+		*notif_win = g_st ? g_st->notif_window : NULL;
+}
+
 static void
 toggle_panel(GtkWidget *btn, gpointer u)
 {
@@ -1025,25 +1138,13 @@ toggle_panel(GtkWidget *btn, gpointer u)
 
 	(void)btn;
 	(void)u;
-	if (gtk_widget_get_visible(g_st->panel_window)) {
-		int cx, cy, nx, ny, floor;
-
-		if (!panel_primary_geo(&geo)) {
-			gtk_widget_hide(g_st->panel_window);
-			gtk_widget_hide(g_st->notif_window);
-			return;
-		}
-		floor = geo.y + geo.height;
-		gtk_window_get_position(GTK_WINDOW(g_st->panel_window), &cx, &cy);
-		anim_window_slide(g_st->panel_window, g_st->panel_window,
-		                  cx, cy, floor, ANIM_SLIDE_MS, TRUE);
-		if (gtk_widget_get_visible(g_st->notif_window)) {
-			gtk_window_get_position(GTK_WINDOW(g_st->notif_window), &nx, &ny);
-			anim_window_slide(g_st->notif_window, g_st->notif_window,
-			                  nx, ny, floor, ANIM_SLIDE_MS, TRUE);
-		}
+	if (g_status_open || (g_st->panel_window && gtk_widget_get_visible(g_st->panel_window))) {
+		status_dismiss();
 		return;
 	}
+	menu_dismiss();
+	g_status_open = TRUE;
+	panel_hold_dismiss(500);
 	if (!panel_primary_geo(&geo))
 		return;
 

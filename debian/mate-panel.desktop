@@ -1,0 +1,16 @@
+[Desktop Entry]
+Type=Application
+Name=Panel
+Comment=Axiom panel for MATE
+Exec=/usr/bin/axiom-panel
+Icon=mate-panel
+StartupNotify=true
+Terminal=false
+Categories=GTK;System;Core;
+OnlyShowIn=MATE;
+NoDisplay=true
+X-MATE-AutoRestart=true
+X-MATE-Autostart-Phase=Panel
+X-MATE-Provides=panel
+X-MATE-Autostart-Notify=true
+X-GNOME-Autostart-Phase=Panel

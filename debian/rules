@@ -1,0 +1,10 @@
+#!/usr/bin/make -f
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	$(MAKE) -C axiom-panel CC="$(CC)" CFLAGS="$(CFLAGS) $(CPPFLAGS)"
+
+override_dh_auto_install:
+	install -D -m 0755 axiom-panel/axiom-panel debian/numate/usr/bin/axiom-panel
