@@ -1,0 +1,9 @@
+[Nemo Action]
+Name=Extract Here
+Comment=Extract archive(s) into current folder
+Exec=engrampa --extract-to="%P" %F
+Selection=notnone
+Extensions=zip;7z;rar;tar;gz;bz2;xz;tar.gz;tar.xz;tar.bz2;
+Icon-Name=extract-archive-symbolic
+Quote=double
+Dependencies=engrampa;

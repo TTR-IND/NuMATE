@@ -1,0 +1,22 @@
+#!/bin/sh
+# NuMATE wallpaper-setting helper — invoked by Nemo's
+# "Set as Desktop Background" action (set-wallpaper.nemo_action).
+#
+# Uses gsettings, not dconf write / /etc/dconf/db — this runs inside a
+# live user session with mate-settings-daemon already running, which
+# is exactly the case gsettings set is for (it notifies the running
+# daemon immediately). The system-wide dconf-db mechanism used
+# elsewhere in this repo's install.sh is for setting defaults before
+# any session exists; this script runs after one already does.
+#
+# Schema/keys confirmed real against the installed org.mate.background
+# schema (gsettings list-keys / gsettings range), not guessed.
+
+set -eu
+
+[ -f "$1" ] || { echo "numate-set-wallpaper: not a file: $1" >&2; exit 1; }
+
+FULL="$(readlink -f "$1")"
+
+gsettings set org.mate.background picture-filename "$FULL"
+gsettings set org.mate.background picture-options 'zoom'

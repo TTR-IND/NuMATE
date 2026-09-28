@@ -1,0 +1,12 @@
+Package: numate-dbgsym
+Source: numate
+Version: 1.0.0-1
+Auto-Built-Package: debug-symbols
+Architecture: amd64
+Maintainer: GonzOS Packaging <packages@gonzos.invalid>
+Installed-Size: 181
+Depends: numate (= 1.0.0-1)
+Section: debug
+Priority: optional
+Description: debug symbols for numate
+Build-Ids: 77867fc57edec6c852bdf130cf686611ceb18821

@@ -1,0 +1,8 @@
+[Nemo Action]
+Name=Set as Desktop Background
+Comment=Set this image as the desktop wallpaper
+Exec=/usr/local/bin/numate-set-wallpaper %F
+Selection=s
+Extensions=jpg;jpeg;png;bmp;svg;webp;tiff;tif;gif;
+Icon-Name=preferences-desktop-wallpaper
+Quote=double

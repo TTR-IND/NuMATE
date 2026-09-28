@@ -1,0 +1,9 @@
+[Nemo Action]
+Name=Add to "%f.7z"
+Comment=Create 7z archive
+Exec=engrampa --add-to="%P/%f.7z" %F
+Selection=notnone
+Extensions=any;
+Icon-Name=add-files-to-archive-symbolic
+Quote=double
+Dependencies=engrampa;

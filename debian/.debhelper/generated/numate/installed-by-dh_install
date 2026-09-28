@@ -1,0 +1,13 @@
+./bin/numate-set-wallpaper
+./backgrounds/numate-wall.png
+./nemo/add-to-name.nemo_action
+./nemo/extract-here.nemo_action
+./nemo/extract-to_.nemo_action
+./nemo/set-wallpaper.nemo_action
+./nemo/gtk.css
+./nemo/nemo-desktop.desktop
+./debian/axiom-panel.desktop
+./debian/mate-panel.desktop
+./debian/mate-panel.desktop
+./theme/gtk-themes
+./theme/cursors

@@ -1,0 +1,15 @@
+Package: numate
+Version: 1.0.0-1
+Architecture: amd64
+Maintainer: GonzOS Packaging <packages@gonzos.invalid>
+Installed-Size: 34106
+Depends: libc6 (>= 2.34), libgdk-pixbuf-2.0-0 (>= 2.22.0), libglib2.0-0t64 (>= 2.76.0), libgtk-3-0t64 (>= 3.21.6), libx11-6, mate-session-manager, numate-settings
+Recommends: nemo, engrampa, pluma
+Conflicts: mate-panel
+Replaces: mate-panel
+Provides: mate-panel
+Section: x11
+Priority: optional
+Description: NuMATE desktop assets and Axiom panel
+ NuMATE provides its Axiom GTK panel, desktop assets, wallpaper helper and
+ Nemo actions for a modernised MATE desktop on Devuan.

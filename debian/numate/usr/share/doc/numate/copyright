@@ -1,0 +1,14 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: NuMATE
+Source: https://github.com/TTR-IND/NuMATE
+
+Files: *
+Copyright: 2026 Josh A. Wheatstone, Torfaen Technology Research IND
+License: AGPL-3+
+ This package is distributed under the GNU Affero General Public License,
+ version 3 or later. The full text is in /usr/share/common-licenses/AGPL-3.
+
+Files: theme/*
+Copyright: upstream theme and cursor authors
+License: GPL-3+
+ The complete text is in /usr/share/common-licenses/GPL-3.

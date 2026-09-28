@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Axiom Panel
+Comment=Panel for the NuMATE desktop
+Exec=axiom-panel
+Icon=mate-panel
+Terminal=false
+Categories=GTK;System;
+OnlyShowIn=MATE;
+NoDisplay=true
+X-MATE-AutoRestart=true
+X-MATE-Autostart-Phase=Panel
+X-MATE-Provides=panel
