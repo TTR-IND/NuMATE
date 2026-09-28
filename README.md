@@ -64,19 +64,9 @@ kernel, the display server, or the init system.
 
 1. **Standard MATE** — installs `mate-desktop-environment` in full.
 2. **Strip** — purges the components NuMATE replaces: `mate-control-center`,
-   `mate-panel`, `mate-applets`, `caja`, `file-roller`.
+   `mate-panel`, `mate-applets`, `caja`, `file-roller`, `gnome-disks`.
 3. **Applications** — Nemo (file manager *and* desktop), Engrampa (archiver),
-   Pluma (text editor), Waterfox (browser), GParted.
-
-   Waterfox is installed from [BrowserWorks' signed apt
-   repository](https://download.opensuse.org/repositories/isv:/BrowserWorks/Debian_13/),
-   registered by the installer with its key pinned via `signed-by=` so it can
-   only validate that one source. It is a normal apt package and updates with
-   the rest of the system — no tarball, nothing in `/opt`.
-
-   **That repository currently ships a beta** (6.7.0~beta.3 as of August 2026).
-   If the repository cannot be reached, no browser is installed and the
-   installer says so — re-run stage 3 once it is available.
+   Pluma (text editor), GParted (disk partition editor).
 4. **Defaults** — binds those applications to their MIME types, system-wide and
    for the invoking user.
 5. **Appearance** — Fluent-grey-Dark, Qogir cursors, Yaru icons, Lato Light and
@@ -293,4 +283,4 @@ These things should simply work.
 
 **NuMATE — a proper desktop, modernised.**
 
-> © 2026 Josh A. Wheatstone - TechnyxLabs - AGPLV3
+> © 2026 Josh A. Wheatstone - Torfaen Technology Research IND. - AGPLV3

@@ -12,7 +12,7 @@
 # Stages:
 #   1. Standard MATE desktop for Devuan
 #   2. Purge the MATE components NuMATE replaces
-#   3. Curated applications  (Nemo, Engrampa, Pluma, Waterfox, GParted)
+#   3. Curated applications  (Nemo, Engrampa, Pluma, GParted)
 #   4. Default-application bindings
 #   5. Fonts, themes, cursors, icons, Nemo integration
 #   6. NuMate-Settings   (fetched from GitHub — the only settings app)
@@ -332,96 +332,6 @@ apt_install() {
     return 1
 }
 
-# Browser resolution lives in one place because two stages need it: stage 3
-# to install it, stage 4 to bind it to MIME types. Duplicating the candidate
-# list would let the two drift, and a stage started in isolation via
-# --from-stage would inherit nothing. Idempotent and safe to call repeatedly.
-BROWSER_PKG=""
-BROWSER_DESKTOP=""
-# Waterfox ships from BrowserWorks' own signed apt repository, so it is a
-# normal package once the repo is registered — no tarball, no /opt, and it
-# receives updates through apt like everything else.
-#
-# The key is dearmoured into /usr/share/keyrings and the source pinned to
-# it with signed-by=, so this key can only ever validate this one
-# repository. Dropping it into /etc/apt/trusted.gpg.d instead would let it
-# sign for ANY repo on the system, which is the vulnerability that
-# signed-by exists to close.
-# NOTE (verified 2026-08-02): this repository currently publishes only
-# waterfox 6.7.0~beta.3 — a BETA channel, not a stable one. Re-check before
-# tagging a NuMATE release; if BrowserWorks publish a stable repository,
-# point these constants at it.
-WATERFOX_KEY_URL="https://download.opensuse.org/repositories/isv:/BrowserWorks/Debian_13/Release.key"
-WATERFOX_REPO_URL="https://download.opensuse.org/repositories/isv:/BrowserWorks/Debian_13/"
-WATERFOX_KEYRING="/usr/share/keyrings/waterfox.gpg"
-WATERFOX_LIST="/etc/apt/sources.list.d/waterfox.list"
-
-# Registers the Waterfox apt repository. Idempotent: safe to re-run, and it
-# does not call `apt-get update` blindly — that is done once, here, scoped
-# to this source, so a failure is attributable to this repo rather than
-# surfacing later as an unrelated package being unavailable.
-setup_waterfox_repo() {
-    if [ "$OPT_DRY_RUN" -eq 1 ]; then
-        info "[dry-run] register Waterfox apt repository"
-        return 0
-    fi
-
-    apt_install "repo tools" curl gnupg ca-certificates >/dev/null 2>&1 || true
-
-    if [ ! -s "$WATERFOX_KEYRING" ]; then
-        # Piped through gpg --dearmor because apt requires a binary keyring;
-        # the published key is ASCII-armoured.
-        if curl -fsSL --connect-timeout 20 --retry 3 --retry-delay 3 \
-                "$WATERFOX_KEY_URL" 2>/dev/null \
-             | gpg --dearmor 2>/dev/null \
-             | sudo tee "$WATERFOX_KEYRING" >/dev/null; then
-            # tee succeeds even if curl produced nothing, so verify the
-            # keyring actually has content rather than trusting the pipeline.
-            if [ -s "$WATERFOX_KEYRING" ]; then
-                ok "Waterfox signing key → $WATERFOX_KEYRING"
-            else
-                sudo rm -f "$WATERFOX_KEYRING"
-                warn "Waterfox key download produced an empty file"
-                return 1
-            fi
-        else
-            sudo rm -f "$WATERFOX_KEYRING"
-            warn "could not fetch the Waterfox signing key"
-            return 1
-        fi
-    else
-        info "Waterfox signing key already present"
-    fi
-
-    printf 'deb [signed-by=%s] %s /\n' "$WATERFOX_KEYRING" "$WATERFOX_REPO_URL" \
-        | sudo tee "$WATERFOX_LIST" >/dev/null
-    ok "Waterfox repository → $WATERFOX_LIST"
-
-    # Update only this source. A full update here would re-fetch every
-    # index on a slow connection for no reason.
-    if sudo apt-get update \
-           -o Dir::Etc::sourcelist="$WATERFOX_LIST" \
-           -o Dir::Etc::sourceparts="-" \
-           -o APT::Get::List-Cleanup="0" >/dev/null 2>&1; then
-        ok "Waterfox package index updated"
-        return 0
-    fi
-
-    warn "could not update the Waterfox package index"
-    return 1
-}
-
-resolve_browser() {
-    BROWSER_PKG=""
-    BROWSER_DESKTOP=""
-    if apt-cache show waterfox >/dev/null 2>&1; then
-        BROWSER_PKG="waterfox"
-    fi
-    if [ -n "$BROWSER_PKG" ] && [ -f "/usr/share/applications/$BROWSER_PKG.desktop" ]; then
-        BROWSER_DESKTOP="$BROWSER_PKG.desktop"
-    fi
-}
-
 # Every mutating command routes through run(). --dry-run then costs one
 # branch in one place rather than a conditional at every call site.
 run() {
@@ -455,7 +365,7 @@ banner
 printf "  ${_b}This installer will:${_rst}\n"
 printf "    %s\n" \
     "install the standard MATE desktop, then strip the parts NuMATE replaces" \
-    "install Nemo, Engrampa, Pluma, Waterfox and GParted as the defaults" \
+    "install Nemo, Engrampa, Pluma and GParted as the defaults" \
     "install NuMATE fonts, themes, cursors and Nemo integration" \
     "fetch and build NuMate-Settings — the single settings application" \
     "build axiom-panel and register it as the MATE panel component"
@@ -512,7 +422,7 @@ stage "Removing the MATE components NuMATE replaces"
 #                             Purging mate-control-center removes it. No
 #                             separate action needed, and no deviation.
 #
-PURGE_PACKAGES="mate-control-center mate-panel mate-applets caja file-roller"
+PURGE_PACKAGES="mate-control-center mate-panel mate-applets caja file-roller gnome-disks"
 
 # Protect the load-bearing infrastructure BEFORE purging. Removing caja and
 # mate-panel takes the mate-desktop-environment metapackage with them (they
@@ -568,10 +478,6 @@ ok "orphaned dependencies cleaned"
 stage_3() {
 stage "Installing the NuMATE application set"
 
-# Everything here is a real apt package. No tarballs and nothing in /opt:
-# Waterfox comes from BrowserWorks' signed repository, so it updates through
-# apt with the rest of the system.
-
 # Split into two lists, because they have different failure semantics.
 #
 # CORE is the desktop. If any of it is missing, the install is broken and
@@ -588,21 +494,6 @@ stage "Installing the NuMATE application set"
 CORE_APPS="nemo engrampa pluma gparted"
 EXTRA_APPS="nemo-image-converter nemo-share nemo-audio-tab nemo-python"
 
-# Waterfox comes from BrowserWorks' apt repository, which has to be
-# registered before apt-cache can see the package at all.
-setup_waterfox_repo || warn "Waterfox repository setup failed"
-
-resolve_browser
-
-if [ -n "$BROWSER_PKG" ]; then
-    CORE_APPS="$CORE_APPS $BROWSER_PKG"
-    info "browser package resolved to $BROWSER_PKG"
-else
-    warn "Waterfox is not available — no browser will be installed"
-    warn "re-run stage 3 once the repository is reachable:"
-    warn "    ./installer.sh --only-stage=3"
-fi
-
 # Run ONCE, capturing output. Never re-run to obtain diagnostics: the second
 # run observes different state than the first (the first may have already
 # unpacked and configured), so it reports on a situation that no longer
@@ -616,7 +507,7 @@ fi
 # to look.
 apt_install "core applications" $CORE_APPS \
     || die "cannot continue without the core applications"
-ok "Nemo, Engrampa, Pluma, GParted${BROWSER_PKG:+, $BROWSER_PKG}"
+ok "Nemo, Engrampa, Pluma, GParted"
 
 # Extras: one at a time, never fatal.
 for _pkg in $EXTRA_APPS; do
@@ -653,27 +544,12 @@ set_default() {
     done
 }
 
-WEB_MIMES="text/html application/xhtml+xml x-scheme-handler/http x-scheme-handler/https"
 ARCHIVE_MIMES="application/zip application/x-7z-compressed application/x-rar \
 application/x-tar application/gzip application/x-bzip2 application/x-xz \
 application/x-compressed-tar application/x-bzip-compressed-tar application/x-xz-compressed-tar"
 TEXT_MIMES="text/plain text/x-csrc text/x-chdr text/markdown application/x-shellscript"
 FOLDER_MIMES="inode/directory"
 
-# The desktop id follows the package name (waterfox.desktop), but it is
-# checked rather than assumed — a wrong id here fails silently and leaves
-# the browser unbound.
-# Re-resolved rather than inherited from stage 3, so that starting at
-# stage 4 with --from-stage still knows which browser is installed.
-resolve_browser
-
-if [ -n "$BROWSER_DESKTOP" ]; then
-    set_default "$BROWSER_DESKTOP" $WEB_MIMES
-    run xdg-settings set default-web-browser "$BROWSER_DESKTOP" 2>/dev/null || true
-    ok "$BROWSER_PKG — default web browser"
-else
-    warn "no browser desktop entry found — web defaults left unchanged"
-fi
 set_default engrampa.desktop $ARCHIVE_MIMES ; ok "Engrampa — default archive manager"
 set_default pluma.desktop    $TEXT_MIMES    ; ok "Pluma — default text editor"
 set_default nemo.desktop     $FOLDER_MIMES  ; ok "Nemo — default file manager"
