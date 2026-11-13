@@ -7,6 +7,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <dirent.h>
+#include <sys/types.h>
 #include <sys/utsname.h>
 #include <time.h>
 #include <unistd.h>
@@ -276,16 +278,65 @@ on_backlight_signal(GDBusProxy *p, const gchar *sender, const gchar *sig,
 	g_signal_handlers_unblock_by_func(g_st->brightness_slider, G_CALLBACK(on_brightness), NULL);
 }
 
+static gboolean
+has_backlight_hardware(void)
+{
+	DIR *d;
+	struct dirent *de;
+	gboolean found = FALSE;
+
+	d = opendir("/sys/class/backlight");
+	if (!d)
+		return FALSE;
+	while ((de = readdir(d)) != NULL) {
+		if (de->d_name[0] == '.')
+			continue;
+		found = TRUE;
+		break;
+	}
+	closedir(d);
+	return found;
+}
+
 static void
 backlight_init(void)
 {
+	GError *err = NULL;
+	gchar *owner;
+	GVariant *ret;
+
+	/* Mate PowerManager exposes the Backlight interface even on desktops
+	 * with no display backlight. Require an actual sysfs device. */
+	if (!has_backlight_hardware())
+		return;
+
 	g_st->backlight_proxy = g_dbus_proxy_new_for_bus_sync(
 		G_BUS_TYPE_SESSION, G_DBUS_PROXY_FLAGS_NONE, NULL,
 		"org.mate.PowerManager",
 		"/org/mate/PowerManager/Backlight",
-		"org.mate.PowerManager.Backlight", NULL, NULL);
-	if (!g_st->backlight_proxy)
+		"org.mate.PowerManager.Backlight", NULL, &err);
+	if (err || !g_st->backlight_proxy) {
+		g_clear_error(&err);
+		g_clear_object(&g_st->backlight_proxy);
 		return;
+	}
+
+	owner = g_dbus_proxy_get_name_owner(g_st->backlight_proxy);
+	if (!owner) {
+		g_clear_object(&g_st->backlight_proxy);
+		return;
+	}
+	g_free(owner);
+
+	ret = g_dbus_proxy_call_sync(g_st->backlight_proxy, "GetBrightness",
+	                             NULL, G_DBUS_CALL_FLAGS_NONE, 800, NULL, &err);
+	if (err || !ret) {
+		g_clear_error(&err);
+		g_clear_object(&g_st->backlight_proxy);
+		return;
+	}
+	g_variant_unref(ret);
+
 	g_signal_connect(g_st->backlight_proxy, "g-signal", G_CALLBACK(on_backlight_signal), NULL);
 }
 
@@ -807,9 +858,48 @@ create_notif_window(void)
 static void
 launch_cmd(GtkWidget *w, gpointer cmd)
 {
+	GError *err = NULL;
+
 	(void)w;
-	if (cmd)
-		g_spawn_command_line_async((const char *)cmd, NULL);
+	if (!cmd)
+		return;
+	if (!g_spawn_command_line_async((const char *)cmd, &err)) {
+		g_warning("launch failed: %s", err ? err->message : "unknown");
+		g_clear_error(&err);
+	}
+}
+
+static void
+do_logout_dialog(GtkWidget *w, gpointer u)
+{
+	GDBusProxy *sm;
+	GError *err = NULL;
+	GVariant *ret;
+
+	(void)w;
+	(void)u;
+	sm = g_dbus_proxy_new_for_bus_sync(
+		G_BUS_TYPE_SESSION, G_DBUS_PROXY_FLAGS_NONE, NULL,
+		"org.gnome.SessionManager",
+		"/org/gnome/SessionManager",
+		"org.gnome.SessionManager", NULL, &err);
+	if (!sm) {
+		g_warning("session manager: %s", err ? err->message : "no proxy");
+		g_clear_error(&err);
+		return;
+	}
+	/* mode 0 = GSM_LOGOUT_MODE_NORMAL: show the logout dialog */
+	ret = g_dbus_proxy_call_sync(sm, "Logout",
+	                             g_variant_new("(u)", 0),
+	                             G_DBUS_CALL_FLAGS_NONE, -1, NULL, &err);
+	if (!ret) {
+		g_warning("Logout: %s", err ? err->message : "failed");
+		g_clear_error(&err);
+	} else {
+		g_variant_unref(ret);
+	}
+	g_object_unref(sm);
+	status_dismiss();
 }
 
 static void
@@ -987,15 +1077,18 @@ static GtkWidget *
 create_settings_window(void)
 {
 	GtkWidget *win, *card, *status, *grid, *brow, *vrow, *bottom;
-	GtkWidget *settings_btn, *power_btn;
 	struct utsname uts;
 	gchar *host;
 
-	win = gtk_window_new(GTK_WINDOW_POPUP);
+	win = gtk_window_new(GTK_WINDOW_TOPLEVEL);
 	panel_ensure_rgba(win);
 	gtk_window_set_decorated(GTK_WINDOW(win), FALSE);
 	gtk_window_set_skip_taskbar_hint(GTK_WINDOW(win), TRUE);
+	gtk_window_set_skip_pager_hint(GTK_WINDOW(win), TRUE);
 	gtk_window_set_keep_above(GTK_WINDOW(win), TRUE);
+	gtk_window_set_accept_focus(GTK_WINDOW(win), TRUE);
+	gtk_window_set_focus_on_map(GTK_WINDOW(win), TRUE);
+	gtk_window_set_type_hint(GTK_WINDOW(win), GDK_WINDOW_TYPE_HINT_POPUP_MENU);
 
 	card = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
 	gtk_widget_set_name(card, "PanelCard");
@@ -1037,8 +1130,8 @@ create_settings_window(void)
 	brow = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, PANEL_ROW_GAP);
 	gtk_widget_set_margin_start(brow, PANEL_ROW_SIDE);
 	gtk_widget_set_margin_end(brow, PANEL_ROW_SIDE);
-	gtk_widget_set_margin_top(brow, PANEL_ROW_TB);
-	gtk_widget_set_margin_bottom(brow, PANEL_ROW_TB);
+	gtk_widget_set_margin_top(brow, 0);
+	gtk_widget_set_margin_bottom(brow, 0);
 	{
 		GtkWidget *bicon = gtk_image_new_from_icon_name("display-brightness-symbolic", GTK_ICON_SIZE_DND);
 
@@ -1054,13 +1147,12 @@ create_settings_window(void)
 	gtk_widget_set_valign(g_st->brightness_slider, GTK_ALIGN_CENTER);
 	g_signal_connect(g_st->brightness_slider, "value-changed", G_CALLBACK(on_brightness), NULL);
 	gtk_box_pack_start(GTK_BOX(brow), g_st->brightness_slider, TRUE, TRUE, 0);
-	gtk_box_pack_start(GTK_BOX(card), brow, FALSE, FALSE, 0);
 
 	vrow = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, PANEL_ROW_GAP);
 	gtk_widget_set_margin_start(vrow, PANEL_ROW_SIDE);
 	gtk_widget_set_margin_end(vrow, PANEL_ROW_SIDE);
-	gtk_widget_set_margin_top(vrow, PANEL_ROW_TB);
-	gtk_widget_set_margin_bottom(vrow, PANEL_ROW_TB);
+	gtk_widget_set_margin_top(vrow, 0);
+	gtk_widget_set_margin_bottom(vrow, 0);
 	g_st->volume_icon = gtk_image_new_from_icon_name("audio-volume-high-symbolic", GTK_ICON_SIZE_DND);
 	gtk_image_set_pixel_size(GTK_IMAGE(g_st->volume_icon), PANEL_ICON_PX);
 	gtk_widget_set_size_request(g_st->volume_icon, PANEL_ICON_PX, PANEL_ICON_PX);
@@ -1073,20 +1165,67 @@ create_settings_window(void)
 	gtk_widget_set_valign(g_st->volume_slider, GTK_ALIGN_CENTER);
 	g_signal_connect(g_st->volume_slider, "value-changed", G_CALLBACK(on_volume), NULL);
 	gtk_box_pack_start(GTK_BOX(vrow), g_st->volume_slider, TRUE, TRUE, 0);
-	gtk_box_pack_start(GTK_BOX(card), vrow, FALSE, FALSE, 0);
 
-	bottom = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
+	{
+		GtkWidget *sliders = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
+		gtk_widget_set_margin_top(sliders, 14);
+		gtk_widget_set_margin_bottom(sliders, 14);
+		if (g_st->backlight_proxy)
+			gtk_box_pack_start(GTK_BOX(sliders), brow, FALSE, FALSE, 0);
+		else {
+			gtk_widget_set_no_show_all(brow, TRUE);
+			gtk_widget_hide(brow);
+		}
+		gtk_box_pack_start(GTK_BOX(sliders), vrow, FALSE, FALSE, 0);
+		gtk_box_pack_start(GTK_BOX(card), sliders, FALSE, FALSE, 0);
+	}
+
+	bottom = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
 	gtk_widget_set_margin_start(bottom, 16);
 	gtk_widget_set_margin_end(bottom, 16);
+	gtk_widget_set_margin_top(bottom, 8);
 	gtk_widget_set_margin_bottom(bottom, 12);
-	settings_btn = gtk_button_new_with_label("Settings");
-	gtk_style_context_add_class(gtk_widget_get_style_context(settings_btn), "action-btn");
-	g_signal_connect(settings_btn, "clicked", G_CALLBACK(launch_cmd), "numate-settings");
-	power_btn = gtk_button_new_with_label("Power");
-	gtk_style_context_add_class(gtk_widget_get_style_context(power_btn), "power-btn");
-	g_signal_connect(power_btn, "clicked", G_CALLBACK(launch_cmd), "mate-session-save --shutdown-dialog");
-	gtk_box_pack_start(GTK_BOX(bottom), settings_btn, TRUE, TRUE, 0);
-	gtk_box_pack_start(GTK_BOX(bottom), power_btn, TRUE, TRUE, 0);
+
+	{
+		GtkWidget *left = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
+		GtkWidget *power_btn, *user_btn, *settings_btn;
+		GtkWidget *picon, *uicon, *sicon;
+
+		power_btn = gtk_button_new();
+		picon = gtk_image_new_from_icon_name("system-shutdown-symbolic", GTK_ICON_SIZE_MENU);
+		gtk_image_set_pixel_size(GTK_IMAGE(picon), 16);
+		gtk_container_add(GTK_CONTAINER(power_btn), picon);
+		gtk_style_context_add_class(gtk_widget_get_style_context(power_btn), "circle-btn");
+		gtk_button_set_relief(GTK_BUTTON(power_btn), GTK_RELIEF_NONE);
+		gtk_widget_set_tooltip_text(power_btn, "Power");
+		g_signal_connect(power_btn, "clicked", G_CALLBACK(launch_cmd), "mate-session-save --shutdown-dialog");
+
+		user_btn = gtk_button_new();
+		uicon = gtk_image_new_from_icon_name("avatar-default-symbolic", GTK_ICON_SIZE_MENU);
+		if (!gtk_icon_theme_has_icon(gtk_icon_theme_get_default(), "avatar-default-symbolic"))
+			gtk_image_set_from_icon_name(GTK_IMAGE(uicon), "user-symbolic", GTK_ICON_SIZE_MENU);
+		gtk_image_set_pixel_size(GTK_IMAGE(uicon), 16);
+		gtk_container_add(GTK_CONTAINER(user_btn), uicon);
+		gtk_style_context_add_class(gtk_widget_get_style_context(user_btn), "circle-btn");
+		gtk_button_set_relief(GTK_BUTTON(user_btn), GTK_RELIEF_NONE);
+		gtk_widget_set_tooltip_text(user_btn, "User session");
+		g_signal_connect(user_btn, "clicked", G_CALLBACK(do_logout_dialog), NULL);
+
+		gtk_box_pack_start(GTK_BOX(left), power_btn, FALSE, FALSE, 0);
+		gtk_box_pack_start(GTK_BOX(left), user_btn, FALSE, FALSE, 0);
+		gtk_box_pack_start(GTK_BOX(bottom), left, FALSE, FALSE, 0);
+
+		settings_btn = gtk_button_new();
+		sicon = gtk_image_new_from_icon_name("preferences-system-symbolic", GTK_ICON_SIZE_MENU);
+		gtk_image_set_pixel_size(GTK_IMAGE(sicon), 16);
+		gtk_container_add(GTK_CONTAINER(settings_btn), sicon);
+		gtk_style_context_add_class(gtk_widget_get_style_context(settings_btn), "circle-btn");
+		gtk_button_set_relief(GTK_BUTTON(settings_btn), GTK_RELIEF_NONE);
+		gtk_widget_set_tooltip_text(settings_btn, "Settings");
+		g_signal_connect(settings_btn, "clicked", G_CALLBACK(launch_cmd), "numate-settings");
+		gtk_widget_set_halign(settings_btn, GTK_ALIGN_END);
+		gtk_box_pack_end(GTK_BOX(bottom), settings_btn, FALSE, FALSE, 0);
+	}
 	gtk_box_pack_start(GTK_BOX(card), bottom, FALSE, FALSE, 0);
 
 	uname(&uts);

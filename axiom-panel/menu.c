@@ -7,7 +7,7 @@
 
 typedef struct {
 	gchar *name;
-	gchar *icon_name;
+	GIcon *icon;
 	GDesktopAppInfo *dai;
 } AppInfo;
 
@@ -45,7 +45,7 @@ app_info_new(GDesktopAppInfo *desktop_app)
 	app->name = g_strdup(g_app_info_get_display_name(G_APP_INFO(desktop_app)));
 	icon = g_app_info_get_icon(G_APP_INFO(desktop_app));
 	if (icon)
-		app->icon_name = g_icon_to_string(icon);
+		app->icon = g_object_ref(icon);
 	app->dai = g_object_ref(desktop_app);
 	return app;
 }
@@ -56,7 +56,8 @@ app_info_free(AppInfo *app)
 	if (!app)
 		return;
 	g_free(app->name);
-	g_free(app->icon_name);
+	if (app->icon)
+		g_object_unref(app->icon);
 	if (app->dai)
 		g_object_unref(app->dai);
 	g_free(app);
@@ -101,8 +102,8 @@ create_app_list_row(AppInfo *app)
 	row = gtk_list_box_row_new();
 	hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
 	gtk_container_set_border_width(GTK_CONTAINER(hbox), 4);
-	if (app->icon_name)
-		icon = gtk_image_new_from_icon_name(app->icon_name, GTK_ICON_SIZE_MENU);
+	if (app->icon)
+		icon = gtk_image_new_from_gicon(app->icon, GTK_ICON_SIZE_MENU);
 	else
 		icon = gtk_image_new_from_icon_name("application-x-executable", GTK_ICON_SIZE_MENU);
 	gtk_image_set_pixel_size(GTK_IMAGE(icon), APP_ICON_SIZE);
@@ -138,15 +139,23 @@ on_search_changed(GtkSearchEntry *entry, MenuData *menu)
 	for (i = 0; i < menu->apps->len; i++) {
 		AppInfo *app = menu->apps->pdata[i];
 		gchar *name_lower = g_utf8_strdown(app->name ? app->name : "", -1);
+		const gchar *exec = g_app_info_get_executable(G_APP_INFO(app->dai));
+		gchar *exec_lower = exec ? g_utf8_strdown(exec, -1) : NULL;
+		gboolean match = strstr(name_lower, query_lower) != NULL;
 
-		if (strstr(name_lower, query_lower))
+		if (!match && exec_lower)
+			match = strstr(exec_lower, query_lower) != NULL;
+
+		if (match)
 			gtk_list_box_insert(GTK_LIST_BOX(menu->search_list),
 			                    create_app_list_row(app), -1);
 		g_free(name_lower);
+		g_free(exec_lower);
 	}
 	g_free(query_lower);
 	gtk_widget_show_all(menu->search_list);
 	gtk_stack_set_visible_child_name(GTK_STACK(menu->stack), "search");
+	gtk_widget_show_all(menu->stack);
 }
 
 static void
@@ -261,6 +270,8 @@ menu_show(MenuData *menu)
 	g_menu_open = TRUE;
 	anim_window_fade(menu->window, menu, 0.0, 1.0, ANIM_FADE_MS, FALSE);
 	gtk_widget_grab_focus(menu->search_entry);
+	gtk_window_present(GTK_WINDOW(menu->window));
+	gtk_widget_grab_focus(menu->search_entry);
 }
 
 static void
@@ -292,12 +303,16 @@ menu_create(GtkWidget *panel)
 
 	menu = g_new0(MenuData, 1);
 	menu->panel = panel;
-	menu->window = gtk_window_new(GTK_WINDOW_POPUP);
+	menu->window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
 	panel_ensure_rgba(menu->window);
 	gtk_window_set_decorated(GTK_WINDOW(menu->window), FALSE);
 	gtk_window_set_skip_taskbar_hint(GTK_WINDOW(menu->window), TRUE);
 	gtk_window_set_skip_pager_hint(GTK_WINDOW(menu->window), TRUE);
 	gtk_window_set_keep_above(GTK_WINDOW(menu->window), TRUE);
+	gtk_window_set_accept_focus(GTK_WINDOW(menu->window), TRUE);
+	gtk_window_set_focus_on_map(GTK_WINDOW(menu->window), TRUE);
+	gtk_window_set_type_hint(GTK_WINDOW(menu->window), GDK_WINDOW_TYPE_HINT_POPUP_MENU);
+	gtk_window_set_transient_for(GTK_WINDOW(menu->window), NULL);
 
 	outer = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
 	gtk_widget_set_name(outer, "GonzoMenu");
@@ -337,6 +352,7 @@ menu_create(GtkWidget *panel)
 	gtk_stack_add_named(GTK_STACK(menu->stack), search_scroll, "search");
 
 	g_signal_connect(menu->search_entry, "search-changed", G_CALLBACK(on_search_changed), menu);
+	g_signal_connect(menu->search_entry, "changed", G_CALLBACK(on_search_changed), menu);
 	g_signal_connect(menu->app_list, "row-activated", G_CALLBACK(on_row_activated), menu);
 	g_signal_connect(menu->search_list, "row-activated", G_CALLBACK(on_row_activated), menu);
 	gtk_widget_add_events(menu->app_list, GDK_BUTTON_PRESS_MASK);
