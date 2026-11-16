@@ -45,6 +45,7 @@ typedef struct {
 	GtkWidget *panel_battery_icon;
 	GtkWidget *battery_label;
 	GtkWidget *battery_box;
+	GtkWidget *tray_box;
 	GtkWidget *panel_window;
 	GtkWidget *notif_window;
 	GtkWidget *notif_inner;
@@ -768,14 +769,110 @@ make_card(AppGroup *g)
 	return card;
 }
 
+static GdkPixbuf *
+pixbuf_mono(GdkPixbuf *src, int size)
+{
+	GdkPixbuf *scaled;
+	int w, h, rs, nch, y, x;
+	guchar *px;
+
+	if (!src || size < 1)
+		return NULL;
+	scaled = gdk_pixbuf_scale_simple(src, size, size, GDK_INTERP_BILINEAR);
+	if (!scaled)
+		return NULL;
+	if (!gdk_pixbuf_get_has_alpha(scaled)) {
+		GdkPixbuf *a = gdk_pixbuf_add_alpha(scaled, FALSE, 0, 0, 0);
+
+		g_object_unref(scaled);
+		scaled = a;
+		if (!scaled)
+			return NULL;
+	}
+	w = gdk_pixbuf_get_width(scaled);
+	h = gdk_pixbuf_get_height(scaled);
+	rs = gdk_pixbuf_get_rowstride(scaled);
+	nch = gdk_pixbuf_get_n_channels(scaled);
+	px = gdk_pixbuf_get_pixels(scaled);
+	for (y = 0; y < h; y++) {
+		guchar *row = px + y * rs;
+
+		for (x = 0; x < w; x++) {
+			guchar *p = row + x * nch;
+			int lum = (p[0] * 30 + p[1] * 59 + p[2] * 11) / 100;
+			int a = (nch > 3) ? p[3] : 255;
+
+			p[0] = p[1] = p[2] = 255;
+			if (nch > 3)
+				p[3] = (guchar)((a * lum) / 255);
+		}
+	}
+	return scaled;
+}
+
+static void
+refresh_pill_tray(void)
+{
+	GList *kids, *l;
+	const int sz = 14;
+
+	if (!g_st || !g_st->tray_box)
+		return;
+	kids = gtk_container_get_children(GTK_CONTAINER(g_st->tray_box));
+	for (l = kids; l; l = l->next)
+		gtk_widget_destroy(GTK_WIDGET(l->data));
+	g_list_free(kids);
+
+	for (l = g_st->groups; l; l = l->next) {
+		AppGroup *g = l->data;
+		GtkWidget *img = NULL;
+
+		if (!g->has_tray_item)
+			continue;
+		if (g->icon_pixbuf) {
+			GdkPixbuf *mono = pixbuf_mono(g->icon_pixbuf, sz);
+
+			if (mono) {
+				img = gtk_image_new_from_pixbuf(mono);
+				g_object_unref(mono);
+			}
+		}
+		if (!img && g->app_icon && *g->app_icon) {
+			GtkIconTheme *theme = gtk_icon_theme_get_default();
+			gchar *sym = g_strconcat(g->app_icon, "-symbolic", NULL);
+			const gchar *name = gtk_icon_theme_has_icon(theme, sym) ? sym : g->app_icon;
+			GError *err = NULL;
+			GdkPixbuf *raw = gtk_icon_theme_load_icon(theme, name, sz, 0, &err);
+			GdkPixbuf *mono;
+
+			g_clear_error(&err);
+			mono = raw ? pixbuf_mono(raw, sz) : NULL;
+			if (raw)
+				g_object_unref(raw);
+			if (mono) {
+				img = gtk_image_new_from_pixbuf(mono);
+				g_object_unref(mono);
+			}
+			g_free(sym);
+		}
+		if (img) {
+			gtk_widget_set_valign(img, GTK_ALIGN_CENTER);
+			gtk_box_pack_start(GTK_BOX(g_st->tray_box), img, FALSE, FALSE, 0);
+		}
+	}
+	gtk_widget_show_all(g_st->tray_box);
+}
+
 static void
 rebuild_notif(void)
 {
 	GList *kids, *l;
 	gboolean any = FALSE;
 
-	if (!g_st->notif_inner)
+	if (!g_st->notif_inner) {
+		refresh_pill_tray();
 		return;
+	}
 	kids = gtk_container_get_children(GTK_CONTAINER(g_st->notif_inner));
 	for (l = kids; l; l = l->next)
 		gtk_widget_destroy(l->data);
@@ -792,6 +889,7 @@ rebuild_notif(void)
 	if (g_st->notif_title)
 		gtk_label_set_text(GTK_LABEL(g_st->notif_title), any ? "Notifications" : "No Notifications");
 	gtk_widget_show_all(g_st->notif_inner);
+	refresh_pill_tray();
 }
 
 static void
@@ -1764,12 +1862,15 @@ status_section_new(GtkWidget *panel)
 	gtk_style_context_add_class(gtk_widget_get_style_context(g_st->pill), "status-pill");
 
 	box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+	g_st->tray_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+	gtk_widget_set_valign(g_st->tray_box, GTK_ALIGN_CENTER);
 	g_st->wifi_icon = gtk_image_new_from_icon_name("network-wireless-offline-symbolic", GTK_ICON_SIZE_MENU);
 	gtk_image_set_pixel_size(GTK_IMAGE(g_st->wifi_icon), 15);
 	g_st->battery_icon = gtk_image_new_from_icon_name("battery-full-symbolic", GTK_ICON_SIZE_MENU);
 	gtk_image_set_pixel_size(GTK_IMAGE(g_st->battery_icon), 15);
 	gtk_widget_set_no_show_all(g_st->battery_icon, TRUE);
 	g_st->clock_label = gtk_label_new("--:--");
+	gtk_box_pack_start(GTK_BOX(box), g_st->tray_box, FALSE, FALSE, 0);
 	gtk_box_pack_start(GTK_BOX(box), g_st->wifi_icon, FALSE, FALSE, 0);
 	gtk_box_pack_start(GTK_BOX(box), g_st->battery_icon, FALSE, FALSE, 0);
 	gtk_box_pack_start(GTK_BOX(box), g_st->clock_label, FALSE, FALSE, 0);
